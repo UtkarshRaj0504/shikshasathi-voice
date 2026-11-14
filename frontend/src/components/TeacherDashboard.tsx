@@ -175,6 +175,38 @@ export function TeacherDashboard({ onLogout }: TeacherDashboardProps) {
     }
   };
 
+  const handleReprocessDocument = async (docId: number) => {
+    if (!selectedChapter) return;
+    setError(null);
+    try {
+      await api.reprocessDocument(docId);
+      const docs = await api.getDocuments(selectedChapter.id);
+      setDocuments(docs);
+    } catch (err: any) {
+      setError(err.message);
+    }
+  };
+
+  // Poll while any document is still being processed, so the status badge (and
+  // any failure message) updates on its own. Stops as soon as nothing is
+  // pending/processing.
+  useEffect(() => {
+    if (!selectedChapter) return;
+    const inFlight = documents.some(
+      (doc) => doc.status === "pending" || doc.status === "processing"
+    );
+    if (!inFlight) return;
+    const timer = setInterval(() => {
+      api
+        .getDocuments(selectedChapter.id)
+        .then((docs) => setDocuments(docs))
+        .catch(() => {
+          /* transient polling errors are ignored; the next tick retries */
+        });
+    }, 4000);
+    return () => clearInterval(timer);
+  }, [selectedChapter, documents]);
+
   const getStatusBadge = (status: string) => {
     const map: Record<string, string> = {
       ready: "badge-accent",
@@ -362,7 +394,26 @@ export function TeacherDashboard({ onLogout }: TeacherDashboardProps) {
                               <li key={doc.id} className="list-item">
                                 <div style={{ minWidth: 0 }}>
                                   <div className="item-name">{doc.filename}</div>
-                                  <div style={{ marginTop: 4 }}>{getStatusBadge(doc.status)}</div>
+                                  <div style={{ marginTop: 4, display: "flex", alignItems: "center", gap: 8 }}>
+                                    {getStatusBadge(doc.status)}
+                                    {doc.status === "failed" && (
+                                      <button
+                                        onClick={() => handleReprocessDocument(doc.id)}
+                                        className="btn btn-secondary"
+                                        style={{ padding: "0.15rem 0.6rem", fontSize: "0.75rem" }}
+                                      >
+                                        Retry
+                                      </button>
+                                    )}
+                                  </div>
+                                  {doc.status === "failed" && doc.error_message && (
+                                    <div
+                                      className="item-meta"
+                                      style={{ color: "var(--color-danger)", marginTop: 4 }}
+                                    >
+                                      {doc.error_message}
+                                    </div>
+                                  )}
                                 </div>
                                 <button
                                   onClick={() => handleDeleteDocument(doc.id)}

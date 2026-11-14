@@ -225,15 +225,16 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ onLogout }) 
     try {
       const chaps = await api.getChapters(subject.id);
       setChapters(chaps);
-      if (chaps.length === 0) {
-        setError("This subject has no chapters with processed study materials yet.");
-      }
     } catch (err: any) {
       setError(err.message || "Failed to load chapters.");
     }
   };
 
   const handleSelectChapter = (chapter: any) => {
+    if (chapter.has_ready_documents === false) {
+      setError(`"${chapter.title}" has no study material yet. Please ask your teacher to upload it.`);
+      return;
+    }
     setSelectedChapter(chapter);
     setError(null);
   };
@@ -645,7 +646,7 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ onLogout }) 
             <div className="card">
               <h3 style={{ marginTop: 0 }}>📚 Choose Study Material</h3>
               <p className="text-muted" style={{ fontSize: "0.9rem", marginBottom: 20 }}>
-                Select a subject and chapter to start your voice-guided interactive learning session. Only chapters with verified study materials are listed.
+                Select a subject and chapter to start your voice-guided interactive learning session. Chapters without study material yet are shown but cannot be opened.
               </p>
 
               {error && <div className="banner banner-danger" role="alert">{error}</div>}
@@ -677,24 +678,29 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ onLogout }) 
                   <label className="field-label">2. Select Chapter</label>
                   {chapters.length === 0 ? (
                     <div className="surface" style={{ padding: 16, color: "var(--color-text-muted)", fontSize: "0.9rem" }}>
-                      No chapters with ready study materials available in {selectedSubject.name}.
+                      No chapters available in {selectedSubject.name} yet.
                     </div>
                   ) : (
                     <div style={{ display: "grid", gap: 8 }}>
                       {chapters.map((chap) => {
                         const isSelected = selectedChapter?.id === chap.id;
+                        // Backend may omit the flag on older data; treat that as available.
+                        const hasMaterials = chap.has_ready_documents !== false;
                         return (
                           <div
                             key={chap.id}
                             onClick={() => handleSelectChapter(chap)}
                             className={`list-item${isSelected ? " active" : ""}`}
+                            style={hasMaterials ? undefined : { opacity: 0.6, cursor: "not-allowed" }}
                           >
                             <div>
                               <div className="item-name">Chapter {chap.order}: {chap.title}</div>
-                              <div className="item-meta">Verified ready study material available</div>
+                              <div className="item-meta">
+                                {hasMaterials ? "Verified ready study material available" : "No study material yet"}
+                              </div>
                             </div>
                             <span style={{ color: isSelected ? "var(--color-accent)" : "var(--color-text-dim)" }}>
-                              {isSelected ? "✓" : "➔"}
+                              {hasMaterials ? (isSelected ? "✓" : "➔") : "—"}
                             </span>
                           </div>
                         );

@@ -68,6 +68,24 @@ def on_startup():
     except Exception:
         pass
 
+    # Recover documents abandoned mid-processing by a restart/spin-down.
+    # Database reads and one UPDATE only: no network and no model calls.
+    try:
+        from app.services.document_processor import recover_stuck_documents
+
+        db = SessionLocal()
+        try:
+            recovered = recover_stuck_documents(db)
+        finally:
+            db.close()
+        if recovered:
+            print(
+                f"[startup] Marked {recovered} interrupted document(s) as failed "
+                "(they can be retried from the teacher view)."
+            )
+    except Exception as e:
+        print(f"Stuck-document recovery error: {e}")
+
     # Print active providers without secrets
     try:
         from app.services.stt_service import get_stt_service

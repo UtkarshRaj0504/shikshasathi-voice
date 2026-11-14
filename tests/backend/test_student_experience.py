@@ -4,7 +4,7 @@ Tests for Student Experience additions:
 - Student preferences (get/set, validation of active voice profiles)
 - Voice profile listing (only active with confirmed consent)
 - TTS synthesis (default voice, cloned voice with authorized label, graceful fallback)
-- Student chapter filtering (only chapters with ready documents)
+- Student chapter listing (all chapters, with ready-document flags; ready_only still filters)
 """
 
 import io
@@ -284,7 +284,7 @@ def test_tts_speak_fallback_when_voice_fails(client, db_session):
         assert "Teacher voice unavailable" in data["notice"]
 
 
-def test_student_only_sees_chapters_with_ready_documents(client, db_session):
+def test_student_sees_all_chapters_with_ready_flags(client, db_session):
     teacher_token = register_and_login(client, "teacher_chaps@example.com", "Teacher Chaps", "teacher")
     student_token = register_and_login(client, "student_chaps@example.com", "Student Chaps", "student")
 
@@ -312,17 +312,28 @@ def test_student_only_sees_chapters_with_ready_documents(client, db_session):
     db_session.add_all([doc_ready, doc_pending])
     db_session.commit()
 
-    # Student listing chapters -> only sees Plate Tectonics
+    # Student listing chapters -> sees BOTH chapters, with readiness flags
     student_res = client.get(
         f"/subjects/{subj.id}/chapters",
         headers={"Authorization": f"Bearer {student_token}"}
     )
     assert student_res.status_code == 200
-    student_chaps = student_res.json()
-    assert len(student_chaps) == 1
-    assert student_chaps[0]["title"] == "Plate Tectonics"
+    by_title = {chap["title"]: chap for chap in student_res.json()}
+    assert set(by_title) == {"Plate Tectonics", "Mineralogy (Empty)"}
+    assert by_title["Plate Tectonics"]["has_ready_documents"] is True
+    assert by_title["Plate Tectonics"]["ready_document_count"] == 1
+    assert by_title["Mineralogy (Empty)"]["has_ready_documents"] is False
+    assert by_title["Mineralogy (Empty)"]["ready_document_count"] == 0
 
-    # Teacher listing chapters -> sees both
+    # ready_only=true still filters down to chapters that have ready documents
+    filtered_res = client.get(
+        f"/subjects/{subj.id}/chapters?ready_only=true",
+        headers={"Authorization": f"Bearer {student_token}"}
+    )
+    assert filtered_res.status_code == 200
+    assert [chap["title"] for chap in filtered_res.json()] == ["Plate Tectonics"]
+
+    # Teacher behavior unchanged: still sees both chapters, same flags
     teacher_res = client.get(
         f"/subjects/{subj.id}/chapters",
         headers={"Authorization": f"Bearer {teacher_token}"}

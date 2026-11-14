@@ -17,6 +17,7 @@ from app.models.user import User, UserRole
 from app.models.subject import Subject
 from app.models.chapter import Chapter
 from app.models.document import Document
+from app.models.document_chunk import DocumentChunk
 from app.schemas.materials import DocumentResponse
 from app.services.document_processor import process_document
 
@@ -181,6 +182,46 @@ def get_document_file(
         filename=doc.filename,
         content_disposition_type="inline",
     )
+
+
+@router.post(
+    "/documents/{document_id}/reprocess",
+    response_model=DocumentResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def reprocess_document(
+    document_id: int,
+    background_tasks: BackgroundTasks,
+    teacher: User = Depends(require_teacher),
+    db: Session = Depends(get_db),
+):
+    """Delete a document's chunks, reset it to pending, and re-queue processing.
+
+    Teacher-only and restricted to the document's owner. Used to recover a
+    document that ended up "failed" (e.g. interrupted processing on Render's
+    free tier) without re-uploading the file.
+    """
+    doc = db.get(Document, document_id)
+    if not doc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
+
+    chapter = db.get(Chapter, doc.chapter_id)
+    if not chapter:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Chapter not found")
+
+    subject = db.query(Subject).filter(Subject.id == chapter.subject_id, Subject.teacher_id == teacher.id).first()
+    if not subject:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
+
+    # Start from a clean slate: any chunks from the previous attempt are removed.
+    db.query(DocumentChunk).filter(DocumentChunk.document_id == doc.id).delete(synchronize_session=False)
+    doc.status = "pending"
+    doc.error_message = None
+    db.commit()
+    db.refresh(doc)
+
+    background_tasks.add_task(process_document, doc.id)
+    return doc
 
 
 @router.delete("/documents/{document_id}", status_code=status.HTTP_204_NO_CONTENT)

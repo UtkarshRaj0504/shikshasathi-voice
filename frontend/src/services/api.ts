@@ -139,6 +139,9 @@ export const api = {
   deleteDocument: (documentId: number) =>
     request(`/documents/${documentId}`, { method: "DELETE" }),
 
+  reprocessDocument: (documentId: number) =>
+    request(`/documents/${documentId}/reprocess`, { method: "POST" }),
+
   fetchDocumentFile: async (documentId: number): Promise<ArrayBuffer> => {
     ensureApiConfigured();
     const token = getToken();

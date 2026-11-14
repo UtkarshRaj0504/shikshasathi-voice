@@ -25,3 +25,13 @@ class Chapter(Base):
     documents: Mapped[list["Document"]] = relationship(  # noqa: F821
         back_populates="chapter", lazy="selectin", cascade="all, delete-orphan"
     )
+
+    @property
+    def ready_document_count(self) -> int:
+        """Documents in this chapter that finished processing successfully."""
+        return sum(1 for doc in self.documents if doc.status == "ready")
+
+    @property
+    def has_ready_documents(self) -> bool:
+        """Whether at least one document in this chapter is ready to study."""
+        return any(doc.status == "ready" for doc in self.documents)

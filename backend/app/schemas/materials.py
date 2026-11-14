@@ -46,6 +46,10 @@ class ChapterResponse(BaseModel):
     order: int
     subject_id: int
     created_at: datetime
+    #: How many of the chapter's documents are ready to study. Lets a student
+    #: view see (and label) chapters that exist but have no material yet.
+    ready_document_count: int = 0
+    has_ready_documents: bool = False
 
     model_config = {"from_attributes": True}
 

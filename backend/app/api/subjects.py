@@ -108,16 +108,18 @@ def list_subject_chapters(
     db: Session = Depends(get_db),
     ready_only: bool = False,
 ):
-    """List chapters for a specific subject (students only see chapters with at least one ready document)."""
+    """List chapters for a specific subject.
+
+    Students see ALL chapters of the subject (a chapter without material is shown
+    with ``has_ready_documents=False`` so the UI can label it "No study material
+    yet"); callers may still pass ``ready_only=true`` to filter those out.
+    """
     subject = db.get(Subject, subject_id)
     if not subject:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Subject not found")
     if user.role == UserRole.teacher and subject.teacher_id != user.id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Subject not found")
 
-    if user.role == UserRole.student or ready_only:
-        return [
-            chap for chap in subject.chapters
-            if any(doc.status == "ready" for doc in chap.documents)
-        ]
+    if ready_only:
+        return [chap for chap in subject.chapters if chap.has_ready_documents]
     return subject.chapters
