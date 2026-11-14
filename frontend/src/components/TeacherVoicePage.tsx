@@ -11,12 +11,8 @@ const READING_SCRIPT =
   "Learning becomes easy when we practise a little every single day.\u201D";
 
 const MIN_SECONDS = 5;
-// The provider accepts at most 30 s; we stop at 25 s so that the encoded sample can
-// never creep past the hard limit and be rejected. See docs/DECISIONS.md.
 const MAX_SECONDS = 25;
 
-// Only these statuses are a usable cloned voice; failed/revoked profiles must not
-// count against the profile limit (the backend uses the same rule).
 const USABLE_STATUSES = ["active", "pending"];
 
 interface VoiceProfile {
@@ -30,11 +26,11 @@ interface VoiceProfile {
   created_at: string;
 }
 
-const STATUS_STYLES: Record<string, { bg: string; color: string }> = {
-  active: { bg: "#d4edda", color: "#155724" },
-  pending: { bg: "#fff3cd", color: "#856404" },
-  failed: { bg: "#f8d7da", color: "#721c24" },
-  revoked: { bg: "#e2e3e5", color: "#383d41" },
+const STATUS_STYLES: Record<string, string> = {
+  active: "badge-accent",
+  pending: "badge-warning",
+  failed: "badge-danger",
+  revoked: "badge-muted",
 };
 
 export const TeacherVoicePage: React.FC = () => {
@@ -48,7 +44,6 @@ export const TeacherVoicePage: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
 
-  // Recording / upload state
   const [mode, setMode] = useState<"record" | "upload">("record");
   const [recording, setRecording] = useState<boolean>(false);
   const [seconds, setSeconds] = useState<number>(0);
@@ -58,7 +53,6 @@ export const TeacherVoicePage: React.FC = () => {
   const [sampleName, setSampleName] = useState<string>("sample.wav");
   const [submitting, setSubmitting] = useState<boolean>(false);
 
-  // Preview state
   const [previewId, setPreviewId] = useState<number | null>(null);
   const [previewAudio, setPreviewAudio] = useState<any>(null);
   const [previewAudioId, setPreviewAudioId] = useState<number | null>(null);
@@ -216,8 +210,6 @@ export const TeacherVoicePage: React.FC = () => {
 
   const usableCount = profiles.filter((p) => USABLE_STATUSES.includes(p.status)).length;
   const limitReached = usableCount >= maxProfiles;
-  // A recorded sample must be long enough; an out-of-range sample can never be
-  // cloned, so submitting it only ever produced an opaque HTTP 400.
   const sampleTooShort = mode === "record" && !!sampleBlob && seconds < MIN_SECONDS;
 
   const canSubmit =
@@ -247,8 +239,6 @@ export const TeacherVoicePage: React.FC = () => {
       await loadProfiles();
     } catch (err: any) {
       setError(err.message || "Could not create the voice profile.");
-      // A failed attempt is recorded as a "failed" profile; reload so the list (and
-      // the profile limit) reflect reality instead of going stale.
       await loadProfiles();
     } finally {
       setSubmitting(false);
@@ -296,41 +286,43 @@ export const TeacherVoicePage: React.FC = () => {
   };
 
   return (
-    <div style={{ fontFamily: "system-ui, sans-serif", maxWidth: "900px" }}>
+    <div style={{ maxWidth: 900 }}>
       <h2 style={{ marginTop: 0 }}>🎙️ My Voice</h2>
-      <p style={{ color: "#555", fontSize: "0.95rem" }}>
+      <p className="text-muted" style={{ fontSize: "0.92rem", marginBottom: 20 }}>
         Create a safe, authorized copy of your voice so your students can hear study answers
         narrated in your own voice. It is <strong>AI-generated</strong> from a short recording you
         provide, it is clearly labelled to students, and you can revoke or delete it at any time.
       </p>
 
       {error && (
-        <div data-testid="voice-error" style={{ background: "#f8d7da", color: "#842029", padding: "0.75rem 1rem", borderRadius: "6px", marginBottom: "1rem", border: "1px solid #f5c2c7" }}>
+        <div data-testid="voice-error" className="banner banner-danger">
           ⚠️ {error}
         </div>
       )}
       {success && (
-        <div data-testid="voice-success" style={{ background: "#d1e7dd", color: "#0f5132", padding: "0.75rem 1rem", borderRadius: "6px", marginBottom: "1rem", border: "1px solid #badbcc" }}>
+        <div data-testid="voice-success" className="banner banner-success">
           ✅ {success}
         </div>
       )}
 
-      {/* Consent statement */}
-      <div style={{ background: "#fff", border: "1px solid #dee2e6", borderRadius: "8px", padding: "1.5rem", marginBottom: "1.5rem" }}>
+      {/* Consent */}
+      <div className="card" style={{ marginBottom: 16 }}>
         <h3 style={{ marginTop: 0 }}>1. Consent</h3>
         <div
           data-testid="consent-text"
-          style={{ background: "#f8f9fa", border: "1px solid #e9ecef", borderRadius: "6px", padding: "1rem", maxHeight: "220px", overflowY: "auto", whiteSpace: "pre-wrap", fontSize: "0.9rem", lineHeight: 1.5 }}
+          className="surface"
+          style={{ padding: 16, maxHeight: 220, overflowY: "auto", whiteSpace: "pre-wrap", fontSize: "0.88rem", lineHeight: 1.55, color: "var(--color-text-muted)" }}
         >
           {consentText || "Loading consent statement..."}
         </div>
-        <label style={{ display: "flex", alignItems: "flex-start", gap: "0.5rem", marginTop: "1rem", cursor: "pointer", fontWeight: 500 }}>
+        <label style={{ display: "flex", alignItems: "flex-start", gap: 8, marginTop: 12, cursor: "pointer", fontWeight: 500 }}>
           <input
             type="checkbox"
             data-testid="consent-checkbox"
             checked={consentChecked}
             onChange={(e) => setConsentChecked(e.target.checked)}
-            style={{ marginTop: "0.25rem" }}
+            className="checkbox"
+            style={{ marginTop: 3 }}
           />
           <span>
             I have read the statement above and I consent to ShikshaSaathi creating an
@@ -340,29 +332,31 @@ export const TeacherVoicePage: React.FC = () => {
       </div>
 
       {/* Record / upload */}
-      <div style={{ background: "#fff", border: "1px solid #dee2e6", borderRadius: "8px", padding: "1.5rem", marginBottom: "1.5rem" }}>
+      <div className="card" style={{ marginBottom: 16 }}>
         <h3 style={{ marginTop: 0 }}>2. Record your voice sample</h3>
-        <div style={{ background: "#e7f1ff", border: "1px solid #b6d4fe", borderRadius: "6px", padding: "0.75rem 1rem", fontSize: "0.85rem", color: "#084298", marginBottom: "1rem" }}>
+        <div className="banner banner-info" style={{ marginBottom: 12 }}>
           <strong>Tips for a clean recording:</strong> sit in a quiet room, turn off music and fans,
           hold the mic a hand-width away, and speak naturally for {MIN_SECONDS}-{MAX_SECONDS} seconds.
         </div>
-        <div style={{ background: "#f8f9fa", border: "1px dashed #ced4da", borderRadius: "6px", padding: "0.75rem 1rem", fontSize: "0.9rem", marginBottom: "1rem" }}>
+        <div className="surface" style={{ padding: 12, marginBottom: 12, fontSize: "0.86rem" }}>
           <strong>Suggested reading script:</strong>
-          <p style={{ margin: "0.4rem 0 0", color: "#495057" }}>{READING_SCRIPT}</p>
+          <p style={{ margin: "6px 0 0", color: "var(--color-text-muted)" }}>{READING_SCRIPT}</p>
         </div>
 
-        <div style={{ display: "flex", gap: "0.5rem", marginBottom: "1rem" }}>
+        <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
           <button
             type="button"
             onClick={() => { resetSample(); setMode("record"); }}
-            style={{ padding: "0.4rem 0.8rem", borderRadius: "4px", border: "1px solid #ced4da", background: mode === "record" ? "#0d6efd" : "#fff", color: mode === "record" ? "#fff" : "#212529", cursor: "pointer" }}
+            className={`btn ${mode === "record" ? "btn-primary" : "btn-secondary"}`}
+            style={{ padding: "0.4rem 0.8rem" }}
           >
             🎙️ Record in browser
           </button>
           <button
             type="button"
             onClick={() => { resetSample(); setMode("upload"); }}
-            style={{ padding: "0.4rem 0.8rem", borderRadius: "4px", border: "1px solid #ced4da", background: mode === "upload" ? "#0d6efd" : "#fff", color: mode === "upload" ? "#fff" : "#212529", cursor: "pointer" }}
+            className={`btn ${mode === "upload" ? "btn-primary" : "btn-secondary"}`}
+            style={{ padding: "0.4rem 0.8rem" }}
           >
             📁 Upload WAV / MP3
           </button>
@@ -370,38 +364,38 @@ export const TeacherVoicePage: React.FC = () => {
 
         {mode === "record" ? (
           <div>
-            <div style={{ display: "flex", alignItems: "center", gap: "1rem" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
               {!recording ? (
-                <button type="button" data-testid="start-recording" onClick={startRecording} style={{ padding: "0.6rem 1.2rem", background: "#28a745", color: "#fff", border: "none", borderRadius: "20px", fontWeight: "bold", cursor: "pointer" }}>
+                <button type="button" data-testid="start-recording" onClick={startRecording} className="btn btn-primary">
                   ● Start recording
                 </button>
               ) : (
-                <button type="button" data-testid="stop-recording" onClick={stopRecording} style={{ padding: "0.6rem 1.2rem", background: "#dc3545", color: "#fff", border: "none", borderRadius: "20px", fontWeight: "bold", cursor: "pointer" }}>
+                <button type="button" data-testid="stop-recording" onClick={stopRecording} className="btn btn-danger">
                   ⏹ Stop ({seconds}s)
                 </button>
               )}
-              {recording && <span style={{ color: "#dc3545", fontWeight: 600 }}>Recording... {seconds}s / {MAX_SECONDS}s</span>}
+              {recording && <span style={{ color: "var(--color-danger)", fontWeight: 600 }}>Recording... {seconds}s / {MAX_SECONDS}s</span>}
             </div>
-            <div style={{ marginTop: "0.75rem", background: "#e9ecef", borderRadius: "6px", height: "12px", overflow: "hidden", width: "220px" }} title="Input level">
-              <div style={{ width: `${level}%`, height: "100%", background: level > 70 ? "#dc3545" : "#28a745", transition: "width 0.1s" }} />
+            <div style={{ marginTop: 10, background: "var(--color-bg-3)", borderRadius: 2, height: 12, overflow: "hidden", width: 220 }} title="Input level">
+              <div style={{ width: `${level}%`, height: "100%", background: level > 70 ? "var(--color-danger)" : "var(--color-accent)", transition: "width 0.1s" }} />
             </div>
           </div>
         ) : (
-          <label style={{ display: "block", padding: "1rem", border: "2px dashed #0d6efd", borderRadius: "8px", textAlign: "center", cursor: "pointer", background: "#f0f4f8" }}>
+          <label className="dropzone">
             {sampleBlob && mode === "upload" ? `Selected: ${sampleName}` : "Click to choose a WAV or MP3 file"}
             <input type="file" accept=".wav,.mp3,audio/wav,audio/mpeg" onChange={handleFileUpload} style={{ display: "none" }} />
           </label>
         )}
 
         {sampleBlob && (
-          <div style={{ marginTop: "1rem" }}>
-            <div style={{ fontSize: "0.85rem", color: "#495057", marginBottom: "0.25rem" }}>
+          <div style={{ marginTop: 12 }}>
+            <div style={{ fontSize: "0.82rem", color: "var(--color-text-muted)", marginBottom: 4 }}>
               Preview your recording before submitting
               {mode === "record" && seconds > 0 ? ` (${seconds}s)` : ""}:
             </div>
             {sampleUrl && <audio data-testid="sample-playback" controls src={sampleUrl} style={{ width: "100%" }} />}
             {mode === "record" && seconds > 0 && seconds < MIN_SECONDS && (
-              <div style={{ color: "#856404", fontSize: "0.85rem", marginTop: "0.4rem" }}>
+              <div className="banner banner-warning" style={{ marginTop: 8, fontSize: "0.82rem" }}>
                 That was only {seconds}s — please record at least {MIN_SECONDS} seconds.
               </div>
             )}
@@ -410,7 +404,7 @@ export const TeacherVoicePage: React.FC = () => {
       </div>
 
       {/* Name + submit */}
-      <div style={{ background: "#fff", border: "1px solid #dee2e6", borderRadius: "8px", padding: "1.5rem", marginBottom: "1.5rem" }}>
+      <div className="card" style={{ marginBottom: 16 }}>
         <h3 style={{ marginTop: 0 }}>3. Name &amp; create</h3>
         <input
           type="text"
@@ -418,10 +412,11 @@ export const TeacherVoicePage: React.FC = () => {
           placeholder="Display name, e.g. Mrs. Rao's Teaching Voice"
           value={voiceName}
           onChange={(e) => setVoiceName(e.target.value)}
-          style={{ width: "100%", padding: "0.6rem", borderRadius: "6px", border: "1px solid #ced4da", marginBottom: "1rem", boxSizing: "border-box" }}
+          className="input"
+          style={{ marginBottom: 12 }}
         />
         {limitReached && (
-          <div style={{ color: "#856404", fontSize: "0.9rem", marginBottom: "0.75rem" }}>
+          <div className="banner banner-warning" style={{ fontSize: "0.86rem", marginBottom: 10 }}>
             You have reached the maximum of {maxProfiles} voice profiles. Revoke or delete one to add another.
           </div>
         )}
@@ -430,68 +425,63 @@ export const TeacherVoicePage: React.FC = () => {
           data-testid="create-voice-button"
           onClick={handleCreate}
           disabled={!canSubmit}
-          style={{
-            padding: "0.7rem 1.4rem",
-            background: canSubmit ? "#0d6efd" : "#adb5bd",
-            color: "#fff",
-            border: "none",
-            borderRadius: "6px",
-            fontWeight: "bold",
-            cursor: canSubmit ? "pointer" : "not-allowed",
-          }}
+          className="btn btn-primary"
         >
           {submitting ? "Creating voice..." : "Create my cloned voice"}
         </button>
         {!consentChecked && (
-          <span style={{ marginLeft: "0.75rem", color: "#6c757d", fontSize: "0.85rem" }}>
+          <span style={{ marginLeft: 12, color: "var(--color-text-dim)", fontSize: "0.82rem" }}>
             Tick the consent box to enable this button.
           </span>
         )}
       </div>
 
       {/* Profile list */}
-      <div style={{ background: "#fff", border: "1px solid #dee2e6", borderRadius: "8px", padding: "1.5rem" }}>
+      <div className="card">
         <h3 style={{ marginTop: 0 }}>Your voice profiles</h3>
         {loading ? (
-          <p style={{ color: "#666" }}>Loading...</p>
+          <div className="profile-loading" role="status" aria-label="Loading voice profiles">
+            <span className="skeleton profile-loading-line" />
+            <span className="skeleton profile-loading-line profile-loading-line-short" />
+          </div>
         ) : profiles.length === 0 ? (
-          <p style={{ color: "#666" }} data-testid="no-profiles">You have no voice profiles yet.</p>
+          <p className="text-muted" data-testid="no-profiles">You have no voice profiles yet.</p>
         ) : (
           <ul style={{ listStyle: "none", padding: 0 }} data-testid="voice-profile-list">
             {profiles.map((p) => {
-              const style = STATUS_STYLES[p.status] || STATUS_STYLES.pending;
+              const cls = STATUS_STYLES[p.status] || "badge-muted";
               return (
                 <li
                   key={p.id}
-                  style={{ border: "1px solid #dee2e6", borderRadius: "8px", padding: "1rem", marginBottom: "0.75rem" }}
+                  className="list-item"
+                  style={{ flexDirection: "column", alignItems: "stretch", gap: 8 }}
                 >
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "0.5rem" }}>
-                    <div>
-                      <div style={{ fontWeight: 600 }}>{p.voice_name}</div>
-                      <div style={{ fontSize: "0.85rem", color: "#6c757d" }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
+                    <div style={{ minWidth: 0 }}>
+                      <div className="item-name">{p.voice_name}</div>
+                      <div className="item-meta">
                         {p.teacher_name}
                         {p.languages ? ` • ${p.languages}` : ""}
                       </div>
                     </div>
-                    <span
-                      data-testid={`status-${p.status}`}
-                      style={{ background: style.bg, color: style.color, padding: "0.2rem 0.6rem", borderRadius: "12px", fontSize: "0.8rem", fontWeight: "bold" }}
-                    >
+                    <span data-testid={`status-${p.status}`} className={`badge ${cls}`}>
                       {p.status}
                     </span>
                   </div>
                   {p.consent_confirmed && p.status === "active" && (
-                    <div style={{ fontSize: "0.8rem", color: "#2e7d32", marginTop: "0.4rem" }}>
-                      🏷️ AI-generated voice, authorized by the teacher.
+                    <div style={{ fontSize: "0.78rem", color: "var(--color-accent)" }}>
+                      <span aria-hidden="true">🏷️</span>{" "}
+                      <span>AI-generated voice, authorized by the teacher.</span>
                     </div>
                   )}
-                  <div style={{ display: "flex", gap: "0.5rem", marginTop: "0.75rem", flexWrap: "wrap" }}>
+                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                     <button
                       type="button"
                       data-testid={`preview-${p.id}`}
                       onClick={() => handlePreview(p.id)}
                       disabled={p.status !== "active" || previewId === p.id}
-                      style={{ padding: "0.4rem 0.8rem", background: "#0d6efd", color: "#fff", border: "none", borderRadius: "4px", cursor: p.status === "active" ? "pointer" : "not-allowed", opacity: p.status === "active" ? 1 : 0.6 }}
+                      className="btn btn-secondary"
+                      style={{ padding: "0.4rem 0.7rem", fontSize: "0.82rem", opacity: p.status === "active" ? 1 : 0.5 }}
                     >
                       {previewId === p.id ? "Generating..." : "🔊 Preview voice"}
                     </button>
@@ -500,7 +490,8 @@ export const TeacherVoicePage: React.FC = () => {
                         type="button"
                         data-testid={`revoke-${p.id}`}
                         onClick={() => handleRevoke(p)}
-                        style={{ padding: "0.4rem 0.8rem", background: "#ffc107", color: "#000", border: "none", borderRadius: "4px", cursor: "pointer" }}
+                        className="btn btn-ghost"
+                        style={{ padding: "0.4rem 0.7rem", fontSize: "0.82rem", color: "var(--color-warning)", borderColor: "var(--color-warning)" }}
                       >
                         Revoke
                       </button>
@@ -509,13 +500,14 @@ export const TeacherVoicePage: React.FC = () => {
                       type="button"
                       data-testid={`delete-${p.id}`}
                       onClick={() => handleDelete(p)}
-                      style={{ padding: "0.4rem 0.8rem", background: "#dc3545", color: "#fff", border: "none", borderRadius: "4px", cursor: "pointer" }}
+                      className="btn btn-danger"
+                      style={{ padding: "0.4rem 0.7rem", fontSize: "0.82rem" }}
                     >
                       Delete
                     </button>
                   </div>
                   {p.id === previewAudioId && previewId === null && previewAudio && (
-                    <div style={{ marginTop: "0.75rem" }}>
+                    <div style={{ marginTop: 8 }}>
                       <AudioPlayer
                         audioBase64={previewAudio.audio_base64}
                         contentType={previewAudio.content_type || "audio/wav"}

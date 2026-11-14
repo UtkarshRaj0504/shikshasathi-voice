@@ -1,9 +1,16 @@
 import React, { useState } from "react";
 import { api, setToken } from "../services/api";
+import { Aurora, LogoMark } from "./Aurora";
 
 interface LoginProps {
   onLoginSuccess: () => void;
 }
+
+const ArrowRight: React.FC = () => (
+  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="square" strokeLinejoin="miter" className="arrow" aria-hidden="true">
+    <path d="M5 12h14M13 6l6 6-6 6" />
+  </svg>
+);
 
 export function Login({ onLoginSuccess }: LoginProps) {
   const [isRegister, setIsRegister] = useState(false);
@@ -38,78 +45,104 @@ export function Login({ onLoginSuccess }: LoginProps) {
   };
 
   return (
-    <div style={{ maxWidth: "400px", margin: "4rem auto", padding: "2rem", border: "1px solid #ddd", borderRadius: "8px", boxShadow: "0 2px 8px rgba(0,0,0,0.05)" }}>
-      <h2>🎓 ShikshaSaathi Voice</h2>
-      <p style={{ color: "#666", marginBottom: "1.5rem" }}>{isRegister ? "Create your account" : "Sign in to your account"}</p>
+    <div className="auth-wrap">
+      <Aurora />
+      <div className="auth-card">
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 24 }}>
+          <LogoMark size={28} />
+          <span style={{ fontWeight: 800, fontSize: "1.1rem", letterSpacing: "-0.02em" }}>ShikshaSaathi</span>
+        </div>
 
-      {error && <div style={{ color: "red", background: "#f8d7da", padding: "0.75rem", borderRadius: "4px", marginBottom: "1rem" }}>{error}</div>}
+        <h1>{isRegister ? "Create your account" : "Sign in"}</h1>
+        <p className="auth-sub">{isRegister ? "Sign up to upload notes and an authorized voice, or to start learning." : "Sign in to your account."}</p>
 
-      <form onSubmit={handleSubmit}>
-        {isRegister && (
-          <div style={{ marginBottom: "1rem" }}>
-            <label style={{ display: "block", marginBottom: "0.5rem", fontWeight: 500 }}>Full Name</label>
+        {error && (
+          <div className="banner banner-danger" role="alert">
+            {error}
+          </div>
+        )}
+
+        <form onSubmit={handleSubmit}>
+          {isRegister && (
+            <div className="field">
+              <label className="field-label" htmlFor="name">Full Name</label>
+              <input
+                id="name"
+                type="text"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                required
+                className="input"
+                autoComplete="name"
+              />
+            </div>
+          )}
+
+          <div className="field">
+            <label className="field-label" htmlFor="email">Email Address</label>
             <input
-              type="text"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
+              id="email"
+              type="email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
               required
-              style={{ width: "100%", padding: "0.5rem", borderRadius: "4px", border: "1px solid #ccc" }}
+              className="input"
+              autoComplete="email"
             />
           </div>
-        )}
 
-        <div style={{ marginBottom: "1rem" }}>
-          <label style={{ display: "block", marginBottom: "0.5rem", fontWeight: 500 }}>Email Address</label>
-          <input
-            type="email"
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            required
-            style={{ width: "100%", padding: "0.5rem", borderRadius: "4px", border: "1px solid #ccc" }}
-          />
-        </div>
-
-        <div style={{ marginBottom: "1rem" }}>
-          <label style={{ display: "block", marginBottom: "0.5rem", fontWeight: 500 }}>Password</label>
-          <input
-            type="password"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            required
-            style={{ width: "100%", padding: "0.5rem", borderRadius: "4px", border: "1px solid #ccc" }}
-          />
-        </div>
-
-        {isRegister && (
-          <div style={{ marginBottom: "1.5rem" }}>
-            <label style={{ display: "block", marginBottom: "0.5rem", fontWeight: 500 }}>Role</label>
-            <select
-              value={role}
-              onChange={(e) => setRole(e.target.value)}
-              style={{ width: "100%", padding: "0.5rem", borderRadius: "4px", border: "1px solid #ccc" }}
-            >
-              <option value="teacher">Teacher</option>
-              <option value="student">Student</option>
-            </select>
+          <div className="field">
+            <label className="field-label" htmlFor="password">Password</label>
+            <input
+              id="password"
+              type="password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              required
+              className="input"
+              autoComplete={isRegister ? "new-password" : "current-password"}
+            />
           </div>
-        )}
 
-        <button
-          type="submit"
-          disabled={loading}
-          style={{ width: "100%", padding: "0.75rem", background: "#007bff", color: "white", border: "none", borderRadius: "4px", fontWeight: "bold", cursor: "pointer" }}
-        >
-          {loading ? "Processing..." : isRegister ? "Register" : "Sign In"}
-        </button>
-      </form>
+          {isRegister && (
+            <div className="field">
+              <label className="field-label">I am a</label>
+              <div className="role-picker">
+                <button
+                  type="button"
+                  className={`role-option${role === "teacher" ? " active" : ""}`}
+                  aria-pressed={role === "teacher"}
+                  onClick={() => setRole("teacher")}
+                >
+                  Teacher
+                </button>
+                <button
+                  type="button"
+                  className={`role-option${role === "student" ? " active" : ""}`}
+                  aria-pressed={role === "student"}
+                  onClick={() => setRole("student")}
+                >
+                  Student
+                </button>
+              </div>
+            </div>
+          )}
 
-      <div style={{ marginTop: "1.5rem", textAlign: "center" }}>
-        <button
-          onClick={() => setIsRegister(!isRegister)}
-          style={{ background: "none", border: "none", color: "#007bff", cursor: "pointer", textDecoration: "underline" }}
-        >
-          {isRegister ? "Already have an account? Sign in" : "Need an account? Register"}
-        </button>
+          <button
+            type="submit"
+            disabled={loading}
+            className="btn btn-primary w-full"
+          >
+            {loading ? "Processing..." : isRegister ? "Register" : "Sign In"} <ArrowRight />
+          </button>
+        </form>
+
+        <div className="auth-link">
+          {isRegister ? "Already have an account? " : "Need an account? "}
+          <button type="button" onClick={() => { setIsRegister(!isRegister); setError(null); }}>
+            {isRegister ? "Sign in" : "Register"}
+          </button>
+        </div>
       </div>
     </div>
   );

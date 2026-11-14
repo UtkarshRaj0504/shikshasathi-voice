@@ -1,6 +1,8 @@
 import React, { useEffect, useState } from "react";
 import { api, removeToken } from "../services/api";
 import { TeacherVoicePage } from "./TeacherVoicePage";
+import { Aurora, LogoMark } from "./Aurora";
+import { UserMenu } from "./UserMenu";
 
 interface TeacherDashboardProps {
   onLogout: () => void;
@@ -15,11 +17,11 @@ export function TeacherDashboard({ onLogout }: TeacherDashboardProps) {
   const [selectedChapter, setSelectedChapter] = useState<any>(null);
   const [documents, setDocuments] = useState<any[]>([]);
 
-  // Form states
   const [newSubjectName, setNewSubjectName] = useState("");
   const [newSubjectDesc, setNewSubjectDesc] = useState("");
   const [newChapterTitle, setNewChapterTitle] = useState("");
   const [uploading, setUploading] = useState(false);
+  const [dropActive, setDropActive] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -122,9 +124,8 @@ export function TeacherDashboard({ onLogout }: TeacherDashboardProps) {
     }
   };
 
-  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file || !selectedChapter) return;
+  const uploadFile = async (file: File) => {
+    if (!file || !selectedChapter || uploading) return;
 
     setUploading(true);
     setError(null);
@@ -136,7 +137,30 @@ export function TeacherDashboard({ onLogout }: TeacherDashboardProps) {
       setError(err.message);
     } finally {
       setUploading(false);
-      e.target.value = "";
+    }
+  };
+
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) void uploadFile(file);
+    e.target.value = "";
+  };
+
+  const handleDrop = (e: React.DragEvent<HTMLLabelElement>) => {
+    e.preventDefault();
+    setDropActive(false);
+    const file = e.dataTransfer.files?.[0];
+    if (file) void uploadFile(file);
+  };
+
+  const handleDragOver = (e: React.DragEvent<HTMLLabelElement>) => {
+    e.preventDefault();
+    setDropActive(true);
+  };
+
+  const handleDragLeave = (e: React.DragEvent<HTMLLabelElement>) => {
+    if (!e.currentTarget.contains(e.relatedTarget as Node | null)) {
+      setDropActive(false);
     }
   };
 
@@ -152,156 +176,84 @@ export function TeacherDashboard({ onLogout }: TeacherDashboardProps) {
   };
 
   const getStatusBadge = (status: string) => {
-    const styles: Record<string, { bg: string; color: string }> = {
-      ready: { bg: "#d4edda", color: "#155724" },
-      processing: { bg: "#fff3cd", color: "#856404" },
-      pending: { bg: "#e2e3e5", color: "#383d41" },
-      failed: { bg: "#f8d7da", color: "#721c24" },
+    const map: Record<string, string> = {
+      ready: "badge-accent",
+      processing: "badge-warning",
+      pending: "badge-muted",
+      failed: "badge-danger",
     };
-    const s = styles[status] || styles.pending;
-    return (
-      <span style={{ background: s.bg, color: s.color, padding: "0.2rem 0.5rem", borderRadius: "4px", fontSize: "0.85rem", fontWeight: "bold" }}>
-        {status}
-      </span>
-    );
+    const cls = map[status] || "badge-muted";
+    return <span className={`badge ${cls}`}>{status}</span>;
   };
 
   return (
-    <div style={{ display: "flex", minHeight: "100vh", fontFamily: "system-ui" }}>
-      {/* Sidebar */}
-      <aside style={{ width: "300px", background: "#f8f9fa", borderRight: "1px solid #dee2e6", padding: "1.5rem" }}>
-        <h3>🎓 Teacher Dashboard</h3>
-        {user && <p style={{ fontSize: "0.9rem", color: "#666", marginBottom: "1.5rem" }}>Logged in as: <strong>{user.name}</strong></p>}
-
-        <button
-          onClick={handleLogout}
-          style={{ width: "100%", padding: "0.5rem", background: "#dc3545", color: "white", border: "none", borderRadius: "4px", marginBottom: "1.5rem", cursor: "pointer" }}
-        >
-          Sign Out
-        </button>
-
-        <div style={{ display: "flex", gap: "0.4rem", marginBottom: "1.5rem" }}>
-          <button
-            onClick={() => setView("materials")}
-            style={{ flex: 1, padding: "0.4rem", borderRadius: "4px", border: "1px solid #ced4da", cursor: "pointer", background: view === "materials" ? "#0d6efd" : "#fff", color: view === "materials" ? "#fff" : "#212529" }}
-          >
-            📚 Materials
-          </button>
-          <button
-            onClick={() => setView("voice")}
-            style={{ flex: 1, padding: "0.4rem", borderRadius: "4px", border: "1px solid #ced4da", cursor: "pointer", background: view === "voice" ? "#0d6efd" : "#fff", color: view === "voice" ? "#fff" : "#212529" }}
-          >
-            🎙️ My Voice
-          </button>
-        </div>
-
-        <h4>📚 Subjects</h4>
-        <form onSubmit={handleCreateSubject} style={{ marginTop: "0.5rem", marginBottom: "1rem" }}>
-          <input
-            type="text"
-            placeholder="Subject Name"
-            value={newSubjectName}
-            onChange={(e) => setNewSubjectName(e.target.value)}
-            required
-            style={{ width: "100%", padding: "0.4rem", marginBottom: "0.4rem", borderRadius: "4px", border: "1px solid #ccc" }}
-          />
-          <input
-            type="text"
-            placeholder="Description (optional)"
-            value={newSubjectDesc}
-            onChange={(e) => setNewSubjectDesc(e.target.value)}
-            style={{ width: "100%", padding: "0.4rem", marginBottom: "0.4rem", borderRadius: "4px", border: "1px solid #ccc" }}
-          />
-          <button type="submit" style={{ width: "100%", padding: "0.4rem", background: "#28a745", color: "white", border: "none", borderRadius: "4px", cursor: "pointer" }}>
-            Add Subject
-          </button>
-        </form>
-
-        <ul style={{ listStyle: "none", padding: 0 }}>
-          {subjects.map((s) => (
-            <li
-              key={s.id}
-              onClick={() => handleSelectSubject(s)}
-              style={{
-                padding: "0.75rem",
-                background: selectedSubject?.id === s.id ? "#e9ecef" : "white",
-                border: "1px solid #dee2e6",
-                borderRadius: "4px",
-                marginBottom: "0.5rem",
-                cursor: "pointer",
-                display: "flex",
-                justifyContent: "space-between",
-                alignItems: "center",
-              }}
-            >
-              <span>{s.name}</span>
-              <button
-                onClick={(e) => { e.stopPropagation(); handleDeleteSubject(s.id); }}
-                style={{ background: "none", border: "none", color: "#dc3545", cursor: "pointer", fontSize: "0.9rem" }}
-              >
-                ✕
-              </button>
-            </li>
-          ))}
-        </ul>
-      </aside>
-
-      {/* Main Content Area */}
-      <main style={{ flex: 1, padding: "2rem" }}>
-        {view === "voice" ? (
-          <TeacherVoicePage />
-        ) : (
-          <>
-        {error && <div style={{ color: "red", background: "#f8d7da", padding: "0.75rem", borderRadius: "4px", marginBottom: "1rem" }}>{error}</div>}
-
-        {!selectedSubject ? (
-          <div style={{ textAlign: "center", marginTop: "4rem", color: "#666" }}>
-            <h2>Select or create a subject from the sidebar to begin.</h2>
+    <div className="app-shell">
+      <Aurora dim />
+      <header className="app-header">
+        <div className="header-left">
+          <LogoMark size={24} />
+          <div style={{ minWidth: 0 }}>
+            <div className="app-title">Teacher Dashboard</div>
+            {user && <div className="app-subtitle">Logged in as {user.name}</div>}
           </div>
-        ) : (
-          <div>
-            <h2>📚 {selectedSubject.name}</h2>
-            <p style={{ color: "#666", marginBottom: "2rem" }}>{selectedSubject.description || "No description provided."}</p>
+        </div>
+        <div className="header-right">
+          <UserMenu name={user?.name} role="Teacher" onLogout={handleLogout} />
+        </div>
+      </header>
 
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "2rem" }}>
-              {/* Chapters Column */}
-              <div style={{ background: "#fff", border: "1px solid #dee2e6", borderRadius: "8px", padding: "1.5rem" }}>
-                <h3>📖 Chapters</h3>
-                <form onSubmit={handleCreateChapter} style={{ margin: "1rem 0" }}>
+      <div className="app-body">
+        <aside className="sidebar">
+          <div className="nav-tabs">
+            <button className={`nav-tab${view === "materials" ? " active" : ""}`} onClick={() => setView("materials")}>
+              📚 Materials
+            </button>
+            <button className={`nav-tab${view === "voice" ? " active" : ""}`} onClick={() => setView("voice")}>
+              🎙️ My Voice
+            </button>
+          </div>
+
+          {view === "materials" && (
+            <>
+              <div className="sidebar-section">
+                <h4>Subjects</h4>
+                <form onSubmit={handleCreateSubject} style={{ marginTop: 8 }}>
                   <input
                     type="text"
-                    placeholder="Chapter Title"
-                    value={newChapterTitle}
-                    onChange={(e) => setNewChapterTitle(e.target.value)}
+                    placeholder="Subject Name"
+                    value={newSubjectName}
+                    onChange={(e) => setNewSubjectName(e.target.value)}
                     required
-                    style={{ width: "100%", padding: "0.5rem", marginBottom: "0.5rem", borderRadius: "4px", border: "1px solid #ccc" }}
+                    className="input"
+                    style={{ marginBottom: 8 }}
                   />
-                  <button type="submit" style={{ width: "100%", padding: "0.5rem", background: "#007bff", color: "white", border: "none", borderRadius: "4px", cursor: "pointer" }}>
-                    Add Chapter
+                  <input
+                    type="text"
+                    placeholder="Description (optional)"
+                    value={newSubjectDesc}
+                    onChange={(e) => setNewSubjectDesc(e.target.value)}
+                    className="input"
+                    style={{ marginBottom: 8 }}
+                  />
+                  <button type="submit" className="btn btn-primary w-full" style={{ padding: "0.5rem" }}>
+                    + Add Subject
                   </button>
                 </form>
+              </div>
 
+              <div className="sidebar-section">
                 <ul style={{ listStyle: "none", padding: 0 }}>
-                  {chapters.map((c) => (
+                  {subjects.map((s) => (
                     <li
-                      key={c.id}
-                      onClick={() => handleSelectChapter(c)}
-                      style={{
-                        padding: "0.75rem",
-                        background: selectedChapter?.id === c.id ? "#e2e6ea" : "#f8f9fa",
-                        border: "1px solid #ced4da",
-                        borderRadius: "4px",
-                        marginBottom: "0.5rem",
-                        cursor: "pointer",
-                        display: "flex",
-                        justifyContent: "space-between",
-                        alignItems: "center",
-                      }}
+                      key={s.id}
+                      onClick={() => handleSelectSubject(s)}
+                      className={`list-item${selectedSubject?.id === s.id ? " active" : ""}`}
                     >
-                      <span>{c.order}. {c.title}</span>
+                      <span className="item-name">{s.name}</span>
                       <button
-                        onClick={(e) => { e.stopPropagation(); handleDeleteChapter(c.id); }}
-                        style={{ background: "none", border: "none", color: "#dc3545", cursor: "pointer" }}
+                        onClick={(e) => { e.stopPropagation(); handleDeleteSubject(s.id); }}
+                        className="btn-delete"
+                        aria-label="Delete subject"
                       >
                         ✕
                       </button>
@@ -309,59 +261,128 @@ export function TeacherDashboard({ onLogout }: TeacherDashboardProps) {
                   ))}
                 </ul>
               </div>
+            </>
+          )}
+        </aside>
 
-              {/* Documents Column */}
-              <div style={{ background: "#fff", border: "1px solid #dee2e6", borderRadius: "8px", padding: "1.5rem" }}>
-                <h3>📄 Study Materials (PDF, DOCX, TXT)</h3>
-                {!selectedChapter ? (
-                  <p style={{ color: "#666", marginTop: "1rem" }}>Select a chapter to upload and view documents.</p>
-                ) : (
-                  <div>
-                    <p style={{ fontWeight: "500", margin: "1rem 0 0.5rem" }}>Chapter: {selectedChapter.title}</p>
-                    <div style={{ margin: "1rem 0" }}>
-                      <label style={{ display: "block", padding: "1rem", border: "2px dashed #007bff", borderRadius: "8px", textAlign: "center", cursor: "pointer", background: "#f0f4f8" }}>
-                        {uploading ? "Uploading & Processing..." : "📁 Click to Upload Document (Max 20MB)"}
-                        <input type="file" accept=".pdf,.docx,.txt,.md" onChange={handleFileUpload} disabled={uploading} style={{ display: "none" }} />
-                      </label>
+        <main className="main-content">
+          {view === "voice" ? (
+            <TeacherVoicePage />
+          ) : (
+            <>
+              {error && <div className="banner banner-danger" role="alert">{error}</div>}
+
+              {!selectedSubject ? (
+                <div style={{ textAlign: "center", marginTop: "4rem", color: "var(--color-text-muted)" }}>
+                  <h2 style={{ marginBottom: 8 }}>Select or create a subject</h2>
+                  <p>Add a subject from the sidebar to begin managing chapters and study materials.</p>
+                </div>
+              ) : (
+                <div>
+                  <h2 style={{ marginBottom: 4 }}>📚 {selectedSubject.name}</h2>
+                  <p className="text-muted" style={{ marginBottom: 24 }}>{selectedSubject.description || "No description provided."}</p>
+
+                  <div className="teacher-workspace">
+                    {/* Chapters */}
+                    <div className="card">
+                      <h3 style={{ marginTop: 0 }}>📖 Chapters</h3>
+                      <form onSubmit={handleCreateChapter} style={{ margin: "12px 0" }}>
+                        <input
+                          type="text"
+                          placeholder="Chapter Title"
+                          value={newChapterTitle}
+                          onChange={(e) => setNewChapterTitle(e.target.value)}
+                          required
+                          className="input"
+                          style={{ marginBottom: 8 }}
+                        />
+                        <button type="submit" className="btn btn-primary w-full" style={{ padding: "0.5rem" }}>
+                          + Add Chapter
+                        </button>
+                      </form>
+
+                      <ul style={{ listStyle: "none", padding: 0 }}>
+                        {chapters.map((c) => (
+                          <li
+                            key={c.id}
+                            onClick={() => handleSelectChapter(c)}
+                            className={`list-item${selectedChapter?.id === c.id ? " active" : ""}`}
+                          >
+                            <span className="item-name">{c.order}. {c.title}</span>
+                            <button
+                              onClick={(e) => { e.stopPropagation(); handleDeleteChapter(c.id); }}
+                              className="btn-delete"
+                              aria-label="Delete chapter"
+                            >
+                              ✕
+                            </button>
+                          </li>
+                        ))}
+                      </ul>
                     </div>
 
-                    <ul style={{ listStyle: "none", padding: 0 }}>
-                      {documents.map((doc) => (
-                        <li
-                          key={doc.id}
-                          style={{
-                            padding: "0.75rem",
-                            background: "#f8f9fa",
-                            border: "1px solid #dee2e6",
-                            borderRadius: "4px",
-                            marginBottom: "0.5rem",
-                            display: "flex",
-                            justifyContent: "space-between",
-                            alignItems: "center",
-                          }}
-                        >
-                          <div>
-                            <div style={{ fontWeight: 500 }}>{doc.filename}</div>
-                            <div style={{ marginTop: "0.25rem" }}>{getStatusBadge(doc.status)}</div>
-                          </div>
-                          <button
-                            onClick={() => handleDeleteDocument(doc.id)}
-                            style={{ background: "none", border: "none", color: "#dc3545", cursor: "pointer" }}
+                    {/* Documents */}
+                    <div className="card">
+                      <h3 style={{ marginTop: 0 }}>📄 Study Materials</h3>
+                      {!selectedChapter ? (
+                        <p className="text-muted" style={{ marginTop: 12 }}>Select a chapter to upload and view documents.</p>
+                      ) : (
+                        <div>
+                          <p className="text-muted" style={{ margin: "8px 0" }}>Chapter: {selectedChapter.title}</p>
+                          <label
+                            className={`dropzone${dropActive ? " drag-active" : ""}`}
+                            style={{ marginTop: 8 }}
+                            onDragOver={handleDragOver}
+                            onDragLeave={handleDragLeave}
+                            onDrop={handleDrop}
+                            aria-busy={uploading}
                           >
-                            Delete
-                          </button>
-                        </li>
-                      ))}
-                    </ul>
+                            {uploading ? (
+                              <span>Uploading and processing…</span>
+                            ) : (
+                              <span>Drop a document here or click to browse (Max 20MB)</span>
+                            )}
+                            <input
+                              type="file"
+                              accept=".pdf,.docx,.txt,.md"
+                              onChange={handleFileUpload}
+                              disabled={uploading}
+                              style={{ display: "none" }}
+                            />
+                          </label>
+
+                          {uploading && (
+                            <div className="upload-progress" role="progressbar" aria-label="Uploading document">
+                              <div className="upload-progress-bar" />
+                            </div>
+                          )}
+
+                          <ul style={{ listStyle: "none", padding: 0, marginTop: 12 }}>
+                            {documents.map((doc) => (
+                              <li key={doc.id} className="list-item">
+                                <div style={{ minWidth: 0 }}>
+                                  <div className="item-name">{doc.filename}</div>
+                                  <div style={{ marginTop: 4 }}>{getStatusBadge(doc.status)}</div>
+                                </div>
+                                <button
+                                  onClick={() => handleDeleteDocument(doc.id)}
+                                  className="btn-delete"
+                                >
+                                  Delete
+                                </button>
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+                    </div>
                   </div>
-                )}
-              </div>
-            </div>
-          </div>
-        )}
-          </>
-        )}
-      </main>
+                </div>
+              )}
+            </>
+          )}
+        </main>
+      </div>
     </div>
   );
 }

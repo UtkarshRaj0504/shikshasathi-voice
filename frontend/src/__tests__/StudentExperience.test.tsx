@@ -193,4 +193,62 @@ describe("StudentDashboard Flow", () => {
       );
     });
   });
+
+  it("replaces the previous answer instead of retaining a conversation history", async () => {
+    vi.spyOn(api, "getDocuments").mockResolvedValue([
+      { id: 301, chapter_id: 101, filename: "notes.txt", status: "ready" },
+    ]);
+    vi.spyOn(api, "fetchDocumentFile").mockResolvedValue(
+      new TextEncoder().encode("Photosynthesis is how plants make food.").buffer
+    );
+    vi.spyOn(api, "updatePreferences").mockResolvedValue({
+      voice_profile_id: null,
+      question_language: "indic-auto",
+      answer_language: "en",
+    });
+    const ask = vi.spyOn(api, "askQuestion")
+      .mockResolvedValueOnce({
+        answer: "First explanation.",
+        sources: [],
+        grounded: true,
+      })
+      .mockResolvedValueOnce({
+        answer: "Second explanation.",
+        sources: [],
+        grounded: true,
+      });
+    vi.spyOn(api, "speakText").mockResolvedValue({
+      audio_base64: "UklGRgAAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=",
+      content_type: "audio/wav",
+      is_cloned: false,
+      is_mock: true,
+      fallback: false,
+      notice: null,
+      label: null,
+    });
+
+    render(<StudentDashboard onLogout={vi.fn()} />);
+
+    await waitFor(() => expect(screen.getByText(/Science/i)).toBeInTheDocument());
+    fireEvent.change(screen.getByRole("combobox"), { target: { value: "10" } });
+    await waitFor(() => expect(screen.getByText(/Light - Reflection & Refraction/i)).toBeInTheDocument());
+    fireEvent.click(screen.getByText(/Light - Reflection & Refraction/i));
+    fireEvent.click(screen.getByRole("button", { name: /Continue to Choose Teacher Voice/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /Save Preference & Open Study Reader/i }));
+
+    const transcript = await screen.findByPlaceholderText(/Speak using the mic or type your question/i);
+    const sendQuestion = screen.getByRole("button", { name: /Edit & Resend Question/i });
+
+    fireEvent.change(transcript, { target: { value: "What is photosynthesis?" } });
+    fireEvent.click(sendQuestion);
+    expect(await screen.findByText("First explanation.")).toBeInTheDocument();
+
+    fireEvent.change(transcript, { target: { value: "Why do plants need sunlight?" } });
+    fireEvent.click(sendQuestion);
+
+    expect(await screen.findByText("Second explanation.")).toBeInTheDocument();
+    expect(screen.queryByText("First explanation.")).not.toBeInTheDocument();
+    expect(screen.queryByText(/Conversation history/i)).not.toBeInTheDocument();
+    expect(ask).toHaveBeenCalledTimes(2);
+  });
 });

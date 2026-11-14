@@ -1,7 +1,11 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 
 interface AudioPlayerProps {
   audioBase64?: string | null;
+  /** Ordered audio parts played as one track; later parts may arrive while playing. */
+  segments?: string[];
+  /** True while the remaining parts are still being generated. */
+  streaming?: boolean;
   contentType?: string;
   isCloned?: boolean;
   isMock?: boolean;
@@ -14,8 +18,22 @@ interface AudioPlayerProps {
   onRetry?: () => void;
 }
 
+function base64ToObjectUrl(base64: string, contentType: string): string {
+  const binaryString = window.atob(base64);
+  const len = binaryString.length;
+  const bytes = new Uint8Array(len);
+  for (let i = 0; i < len; i++) {
+    bytes[i] = binaryString.charCodeAt(i);
+  }
+  return URL.createObjectURL(new Blob([bytes], { type: contentType }));
+}
+
+const SPEEDS = [1, 1.25, 1.5, 0.75];
+
 export const AudioPlayer: React.FC<AudioPlayerProps> = ({
   audioBase64,
+  segments,
+  streaming = false,
   contentType = "audio/wav",
   isCloned = false,
   isMock = false,
@@ -28,68 +46,120 @@ export const AudioPlayer: React.FC<AudioPlayerProps> = ({
   onRetry,
 }) => {
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const urlCacheRef = useRef<Map<string, string>>(new Map());
+  const firstPartRef = useRef<string | null>(null);
+  const wantPlayRef = useRef<boolean>(autoPlay);
+
+  const [urls, setUrls] = useState<string[]>([]);
+  const [index, setIndex] = useState<number>(0);
   const [isPlaying, setIsPlaying] = useState<boolean>(false);
   const [currentTime, setCurrentTime] = useState<number>(0);
   const [duration, setDuration] = useState<number>(0);
-  const [audioUrl, setAudioUrl] = useState<string | null>(null);
   const [playbackError, setPlaybackError] = useState<string | null>(null);
+  const [awaitingMore, setAwaitingMore] = useState<boolean>(false);
+  const [speed, setSpeed] = useState<number>(1);
 
-  // Convert base64 to Blob URL
+  const parts = useMemo<string[]>(() => {
+    if (segments && segments.length > 0) return segments;
+    return audioBase64 ? [audioBase64] : [];
+  }, [segments, audioBase64]);
+
   useEffect(() => {
-    if (!audioBase64) {
-      if (audioUrl) {
-        URL.revokeObjectURL(audioUrl);
-        setAudioUrl(null);
-      }
+    if (parts.length === 0) {
+      urlCacheRef.current.forEach((url) => URL.revokeObjectURL(url));
+      urlCacheRef.current = new Map();
+      firstPartRef.current = null;
+      setUrls([]);
+      setIndex(0);
+      setCurrentTime(0);
+      setDuration(0);
+      setIsPlaying(false);
+      setAwaitingMore(false);
       return;
     }
 
-    try {
-      const binaryString = window.atob(audioBase64);
-      const len = binaryString.length;
-      const bytes = new Uint8Array(len);
-      for (let i = 0; i < len; i++) {
-        bytes[i] = binaryString.charCodeAt(i);
-      }
-      const blob = new Blob([bytes], { type: contentType });
-      const url = URL.createObjectURL(blob);
-      setAudioUrl(url);
-      setPlaybackError(null);
+    if (parts[0] !== firstPartRef.current) {
+      urlCacheRef.current.forEach((url) => URL.revokeObjectURL(url));
+      urlCacheRef.current = new Map();
+      firstPartRef.current = parts[0];
+      wantPlayRef.current = autoPlay;
+      setIndex(0);
+      setCurrentTime(0);
+      setDuration(0);
+      setIsPlaying(false);
+      setAwaitingMore(false);
+    }
 
-      return () => {
-        URL.revokeObjectURL(url);
-      };
-    } catch (err: any) {
+    try {
+      const cache = urlCacheRef.current;
+      const next = parts.map((base64) => {
+        let url = cache.get(base64);
+        if (!url) {
+          url = base64ToObjectUrl(base64, contentType);
+          cache.set(base64, url);
+        }
+        return url;
+      });
+      setPlaybackError(null);
+      setUrls(next);
+    } catch (err) {
       console.error("Failed to decode audio base64:", err);
       setPlaybackError("Failed to decode audio data.");
     }
-  }, [audioBase64, contentType]);
+  }, [parts, contentType, autoPlay]);
 
-  // Autoplay when audio URL changes
   useEffect(() => {
-    if (!audioUrl || !audioRef.current || !autoPlay) return;
-
     const audio = audioRef.current;
-    audio.currentTime = 0;
-    const playPromise = audio.play();
-    if (playPromise !== undefined) {
-      playPromise
-        .then(() => setIsPlaying(true))
-        .catch((err) => {
-          console.warn("Autoplay was prevented by browser policy:", err);
-          setIsPlaying(false);
-        });
+    const url = urls[index];
+    if (!audio || !url) return;
+
+    if (audio.getAttribute("src") !== url) {
+      audio.src = url;
+      audio.load();
     }
-  }, [audioUrl, autoPlay]);
+    if (wantPlayRef.current) {
+      const playPromise = audio.play();
+      if (playPromise !== undefined) {
+        playPromise
+          .then(() => setIsPlaying(true))
+          .catch((err) => {
+            console.warn("Autoplay was prevented by browser policy:", err);
+            setIsPlaying(false);
+          });
+      }
+    }
+  }, [urls, index]);
+
+  useEffect(() => {
+    if (awaitingMore && index + 1 < urls.length) {
+      setAwaitingMore(false);
+      setIndex(index + 1);
+      setCurrentTime(0);
+      setDuration(0);
+    }
+  }, [urls, awaitingMore, index]);
+
+  useEffect(() => {
+    return () => {
+      urlCacheRef.current.forEach((url) => URL.revokeObjectURL(url));
+      urlCacheRef.current.clear();
+    };
+  }, []);
 
   const togglePlayPause = () => {
     const audio = audioRef.current;
     if (!audio) return;
 
     if (isPlaying) {
+      wantPlayRef.current = false;
       audio.pause();
       setIsPlaying(false);
     } else {
+      wantPlayRef.current = true;
+      const url = urls[index];
+      if (url && audio.getAttribute("src") !== url) {
+        audio.src = url;
+      }
       audio
         .play()
         .then(() => setIsPlaying(true))
@@ -102,7 +172,14 @@ export const AudioPlayer: React.FC<AudioPlayerProps> = ({
 
   const replay = () => {
     const audio = audioRef.current;
-    if (!audio) return;
+    if (!audio || urls.length === 0) return;
+    wantPlayRef.current = true;
+    setAwaitingMore(false);
+    setIndex(0);
+    setCurrentTime(0);
+    if (audio.getAttribute("src") !== urls[0]) {
+      audio.src = urls[0];
+    }
     audio.currentTime = 0;
     audio
       .play()
@@ -110,6 +187,13 @@ export const AudioPlayer: React.FC<AudioPlayerProps> = ({
       .catch((err) => {
         console.error("Replay error:", err);
       });
+  };
+
+  const handleSpeedChange = () => {
+    const idx = SPEEDS.indexOf(speed);
+    const next = SPEEDS[(idx + 1) % SPEEDS.length];
+    setSpeed(next);
+    if (audioRef.current) audioRef.current.playbackRate = next;
   };
 
   const handleTimeUpdate = () => {
@@ -125,8 +209,16 @@ export const AudioPlayer: React.FC<AudioPlayerProps> = ({
   };
 
   const handleEnded = () => {
-    setIsPlaying(false);
-    setCurrentTime(0);
+    if (index + 1 < urls.length) {
+      setIndex(index + 1);
+      setCurrentTime(0);
+      setDuration(0);
+    } else if (streaming) {
+      setAwaitingMore(true);
+    } else {
+      setIsPlaying(false);
+      setCurrentTime(0);
+    }
   };
 
   const formatTime = (timeInSec: number) => {
@@ -136,207 +228,111 @@ export const AudioPlayer: React.FC<AudioPlayerProps> = ({
     return `${mins.toString().padStart(2, "0")}:${secs.toString().padStart(2, "0")}`;
   };
 
-  if (loading) {
-    return (
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: "0.5rem",
-          padding: "0.75rem 1rem",
-          background: "#e7f1ff",
-          color: "#0d6efd",
-          borderRadius: "8px",
-          border: "1px solid #b6d4fe",
-          fontSize: "0.95rem",
-          margin: "0.75rem 0",
-        }}
-      >
-        <span style={{ animation: "spin 1s linear infinite" }}>⏳</span>
-        <span>Synthesizing voice response with AI audio engine...</span>
-      </div>
-    );
+  if (urls.length === 0) {
+    if (loading) {
+      return (
+        <div className="banner banner-info">
+          <span style={{ animation: "spin 1s linear infinite" }}>⏳</span>
+          <span>Synthesizing voice response with AI audio engine...</span>
+        </div>
+      );
+    }
+
+    if (error || playbackError) {
+      return (
+        <div className="banner banner-danger" style={{ justifyContent: "space-between" }}>
+          <span>⚠️ {error || playbackError}</span>
+          {onRetry && (
+            <button className="btn btn-secondary" style={{ padding: "0.3rem 0.7rem", fontSize: "0.82rem" }} onClick={onRetry}>
+              Retry Audio
+            </button>
+          )}
+        </div>
+      );
+    }
+
+    return null;
   }
 
-  if (error || playbackError) {
-    return (
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          padding: "0.75rem 1rem",
-          background: "#f8d7da",
-          color: "#842029",
-          borderRadius: "8px",
-          border: "1px solid #f5c2c7",
-          fontSize: "0.95rem",
-          margin: "0.75rem 0",
-        }}
-      >
-        <span>⚠️ {error || playbackError}</span>
-        {onRetry && (
-          <button
-            onClick={onRetry}
-            style={{
-              padding: "0.3rem 0.6rem",
-              background: "#842029",
-              color: "#fff",
-              border: "none",
-              borderRadius: "4px",
-              cursor: "pointer",
-              fontSize: "0.85rem",
-            }}
-          >
-            Retry Audio
-          </button>
-        )}
-      </div>
-    );
-  }
-
-  if (!audioUrl) return null;
+  const progressPct = duration ? (currentTime / duration) * 100 : 0;
 
   return (
-    <div
-      style={{
-        background: "#f8f9fa",
-        border: "1px solid #dee2e6",
-        borderRadius: "8px",
-        padding: "1rem",
-        margin: "0.75rem 0",
-      }}
-    >
+    <div className="audio-player">
       <audio
         ref={audioRef}
-        src={audioUrl}
         onTimeUpdate={handleTimeUpdate}
         onLoadedMetadata={handleLoadedMetadata}
         onEnded={handleEnded}
         onError={() => setPlaybackError("Error during audio stream playback.")}
       />
 
-      {/* Fallback Notice */}
+      {streaming && (
+        <div data-testid="streaming-audio-notice" className="banner banner-info" style={{ marginBottom: 12 }}>
+          <span style={{ animation: "spin 1s linear infinite" }}>⏳</span>
+          <span>
+            Playing part {index + 1} of {urls.length} — generating the rest of the answer…
+          </span>
+        </div>
+      )}
+
       {fallback && (
-        <div
-          style={{
-            background: "#fff3cd",
-            color: "#664d03",
-            padding: "0.5rem 0.75rem",
-            borderRadius: "6px",
-            fontSize: "0.85rem",
-            marginBottom: "0.75rem",
-            border: "1px solid #ffecb5",
-          }}
-        >
+        <div className="banner banner-warning" style={{ marginBottom: 12 }}>
           ℹ️ {notice || "Teacher voice unavailable; used default voice."}
         </div>
       )}
 
-      {/* Mock Audio Transparency Badge */}
       {isMock && (
-        <div
-          data-testid="mock-audio-badge"
-          style={{
-            display: "inline-flex",
-            alignItems: "center",
-            gap: "0.4rem",
-            background: "#fff3cd",
-            color: "#664d03",
-            padding: "0.3rem 0.65rem",
-            borderRadius: "16px",
-            fontSize: "0.8rem",
-            fontWeight: 600,
-            marginBottom: "0.75rem",
-            marginRight: "0.5rem",
-            border: "1px solid #ffe69c",
-          }}
-        >
-          <span>🧪</span>
-          <span>mock audio (synthetic development tone)</span>
-        </div>
+        <span data-testid="mock-audio-badge" className="badge badge-warning" style={{ marginRight: 8, marginBottom: 12 }}>
+          🧪 mock audio (synthetic development tone)
+        </span>
       )}
 
-      {/* Authorized Cloned Voice Transparency Badge */}
       {isCloned && (
-        <div
-          style={{
-            display: "inline-flex",
-            alignItems: "center",
-            gap: "0.4rem",
-            background: "#e8f5e9",
-            color: "#2e7d32",
-            padding: "0.35rem 0.75rem",
-            borderRadius: "16px",
-            fontSize: "0.85rem",
-            fontWeight: 600,
-            marginBottom: "0.75rem",
-            border: "1px solid #c8e6c9",
-          }}
-        >
-          <span>🎙️</span>
+        <span className="badge badge-accent" style={{ marginRight: 8, marginBottom: 12 }}>
+          <span aria-hidden="true">🎙️</span>{" "}
           <span>{label || "AI-generated voice, authorized by the teacher."}</span>
-        </div>
+        </span>
       )}
 
-      {/* Player Controls Bar */}
-      <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
+      <div className="controls">
         <button
+          className="play-btn"
           onClick={togglePlayPause}
-          style={{
-            padding: "0.5rem 1rem",
-            background: isPlaying ? "#ffc107" : "#0d6efd",
-            color: isPlaying ? "#000" : "#fff",
-            border: "none",
-            borderRadius: "6px",
-            fontWeight: 600,
-            cursor: "pointer",
-            fontSize: "0.95rem",
-            display: "flex",
-            alignItems: "center",
-            gap: "0.4rem",
-          }}
+          aria-label={isPlaying ? "⏸ Pause" : "▶ Play"}
         >
-          {isPlaying ? "⏸ Pause" : "▶ Play"}
+          {isPlaying ? "⏸" : "▶"}
         </button>
 
         <button
           onClick={replay}
-          style={{
-            padding: "0.5rem 0.75rem",
-            background: "#6c757d",
-            color: "#fff",
-            border: "none",
-            borderRadius: "6px",
-            fontWeight: 500,
-            cursor: "pointer",
-            fontSize: "0.9rem",
-          }}
+          className="btn btn-ghost"
+          style={{ padding: "0.4rem 0.6rem" }}
           title="Replay from start"
+          aria-label="Replay"
         >
-          🔄 Replay
+          🔄
         </button>
 
-        {/* Timeline Slider */}
-        <input
-          type="range"
-          min="0"
-          max={duration || 100}
-          step="0.1"
-          value={currentTime}
-          onChange={(e) => {
-            const newTime = Number(e.target.value);
+        <div
+          className="timeline"
+          onClick={(e) => {
+            const rect = e.currentTarget.getBoundingClientRect();
+            const pct = (e.clientX - rect.left) / rect.width;
+            const newTime = pct * duration;
             setCurrentTime(newTime);
-            if (audioRef.current) {
-              audioRef.current.currentTime = newTime;
-            }
+            if (audioRef.current) audioRef.current.currentTime = newTime;
           }}
-          style={{ flex: 1, cursor: "pointer" }}
-        />
+        >
+          <div className="timeline-fill" style={{ width: `${progressPct}%` }} />
+        </div>
 
-        <span style={{ fontSize: "0.85rem", color: "#666", minWidth: "85px", textAlign: "right" }}>
+        <span className="time">
           {formatTime(currentTime)} / {formatTime(duration)}
         </span>
+
+        <button className="speed-btn" onClick={handleSpeedChange} title="Playback speed">
+          {speed}×
+        </button>
       </div>
     </div>
   );

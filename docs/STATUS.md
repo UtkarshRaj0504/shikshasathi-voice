@@ -21,8 +21,8 @@ network calls) and committed.
 ## Test results (last run)
 
 - Backend: `python -m pytest tests/backend -q` → **134 passed**.
-- Frontend: `npm run build` → exit 0 (only the pre-existing pdfjs `eval` and chunk-size warnings).
-- Frontend unit tests: `npx vitest run` → **13 passed** (2 files).
+- Frontend: `npm run build` → exit 0 (PDF reader is split into its own lazy chunk; only the pre-existing pdfjs `eval` warning remains).
+- Frontend unit tests: `npm run test -- --run` → **14 passed** (2 files).
 
 ## BUG 8 — creating a voice profile returned HTTP 400
 
@@ -271,3 +271,15 @@ See `docs/MANUAL_TEST_CHECKLIST.md` for step-by-step checks.
 
 None — all bug fixes and the teacher voice-cloning feature are complete. See
 `docs/BLOCKERS.md` for the (unconfirmed) account-level gating note about Gnani voice cloning.
+
+## Frontend UI redesign continuation
+
+Completed the remaining frontend-only polish in the existing React + Vite redesign:
+
+- PDF rendering is lazy-loaded, reducing the initial JavaScript bundle; the production build emits a separate `PdfReader` chunk.
+- The student screen replaces its latest question/answer instead of retaining a history drawer or sending prior turns.
+- The landing trace has illustrative steps without a fabricated timing value.
+- Teacher document uploads support drag and drop and use honest indeterminate progress with the existing API call.
+- Shared account menus, reduced-motion handling, loading skeletons, and responsive teacher layouts are in place.
+
+Verification: `npm run test -- --run` → **14 passed**; `npm run build` → **exit 0**. The existing pdfjs `eval` warning remains.

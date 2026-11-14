@@ -1,7 +1,12 @@
-import React, { useEffect, useState, useRef } from "react";
+import React, { lazy, Suspense, useEffect, useState, useRef } from "react";
 import { api, removeToken } from "../services/api";
-import { PdfReader } from "./PdfReader";
 import { AudioPlayer } from "./AudioPlayer";
+import { Aurora, LogoMark } from "./Aurora";
+import { UserMenu } from "./UserMenu";
+
+const PdfReader = lazy(() =>
+  import("./PdfReader").then((module) => ({ default: module.PdfReader }))
+);
 
 interface StudentDashboardProps {
   onLogout: () => void;
@@ -27,6 +32,38 @@ interface MessageTurn {
 }
 
 type StudyStep = "SELECT_MATERIAL" | "CHOOSE_VOICE" | "STUDY_READER";
+
+//: Gnani TTS has a fixed per-request latency floor (~9s) regardless of length,
+//: so the answer is split into sentence-aligned parts and each part is played as
+//: soon as it is synthesized — audio starts in seconds instead of after the
+//: whole answer has been generated.
+const SPEECH_PART_CHARS = 700;
+
+function splitAnswerForSpeech(text: string, maxChars: number = SPEECH_PART_CHARS): string[] {
+  const clean = (text || "").trim();
+  if (!clean) return [];
+  if (clean.length <= maxChars) return [clean];
+
+  const parts: string[] = [];
+  let remaining = clean;
+  while (remaining.length > maxChars) {
+    const window = remaining.slice(0, maxChars);
+    let splitAt = -1;
+    for (const sep of [". ", "! ", "? ", "। ", "\n"]) {
+      const idx = window.lastIndexOf(sep);
+      if (idx > splitAt) splitAt = idx + 1;
+    }
+    if (splitAt < maxChars * 0.5) {
+      const space = window.lastIndexOf(" ");
+      splitAt = space > 0 ? space : maxChars;
+    }
+    const piece = remaining.slice(0, splitAt).trim();
+    if (piece) parts.push(piece);
+    remaining = remaining.slice(splitAt).trim();
+  }
+  if (remaining) parts.push(remaining);
+  return parts;
+}
 
 // WAV audio recording helpers
 function writeString(view: DataView, offset: number, str: string) {
@@ -61,6 +98,12 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
 
   return new Blob([view], { type: "audio/wav" });
 }
+
+const ArrowRight: React.FC = () => (
+  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="square" strokeLinejoin="miter" className="arrow" aria-hidden="true">
+    <path d="M5 12h14M13 6l6 6-6 6" />
+  </svg>
+);
 
 export const StudentDashboard: React.FC<StudentDashboardProps> = ({ onLogout }) => {
   const [user, setUser] = useState<any>(null);
@@ -100,8 +143,8 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ onLogout }) 
   const [ttsLoading, setTtsLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Latest question & answer (only the most recent exchange is kept)
-  const [conversation, setConversation] = useState<MessageTurn[]>([]);
+  // Keep only the current exchange; each new question replaces the previous one.
+  const [latestExchange, setLatestExchange] = useState<MessageTurn[]>([]);
   const [sampleAudio, setSampleAudio] = useState<{
     base64: string | null;
     contentType?: string;
@@ -110,7 +153,7 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ onLogout }) 
   } | null>(null);
   const [sampleLoadingId, setSampleLoadingId] = useState<number | null>(null);
   const [latestAudio, setLatestAudio] = useState<{
-    base64: string | null;
+    segments: string[];
     contentType?: string;
     isCloned: boolean;
     isMock?: boolean;
@@ -118,7 +161,11 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ onLogout }) 
     notice: string | null;
     label: string | null;
     error?: string | null;
+    streaming?: boolean;
   } | null>(null);
+
+  // Identifies the newest question; an older in-flight request must not overwrite it.
+  const askRequestIdRef = useRef(0);
 
   // Audio refs
   const audioContextRef = useRef<AudioContext | null>(null);
@@ -154,9 +201,7 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ onLogout }) 
       setVoices(voiceList || []);
       if (prefs) {
         setSelectedVoiceId(prefs.voice_profile_id || null);
-        // Load question_language (for STT) - defaults to indic-auto
         if (prefs.question_language) setQuestionLanguage(prefs.question_language);
-        // Load answer_language (for TTS and LLM)
         if (prefs.answer_language) setAnswerLanguage(prefs.answer_language);
       }
     } catch (err: any) {
@@ -170,7 +215,6 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ onLogout }) 
     onLogout();
   };
 
-  // Step 1: Subject & Chapter Selection
   const handleSelectSubject = async (subject: any) => {
     setSelectedSubject(subject);
     setSelectedChapter(null);
@@ -179,7 +223,6 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ onLogout }) 
     setError(null);
 
     try {
-      // Backend only returns chapters that have at least one ready document for students
       const chaps = await api.getChapters(subject.id);
       setChapters(chaps);
       if (chaps.length === 0) {
@@ -204,7 +247,6 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ onLogout }) 
     setCurrentStep("CHOOSE_VOICE");
   };
 
-  // Step 2: Voice Selection
   const handleSaveVoiceAndOpenReader = async (voiceId: number | null) => {
     setSelectedVoiceId(voiceId);
     try {
@@ -220,7 +262,6 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ onLogout }) 
     openReaderForChapter(selectedChapter);
   };
 
-  // Persist the student's spoken (question) language so their choice is remembered.
   const handleQuestionLanguageChange = async (lang: string) => {
     setQuestionLanguage(lang);
     try {
@@ -234,7 +275,6 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ onLogout }) 
     }
   };
 
-  // Step 3: Open Reader
   const openReaderForChapter = async (chapter: any) => {
     setCurrentStep("STUDY_READER");
     setDocLoading(true);
@@ -257,7 +297,6 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ onLogout }) 
       if (isPdf) {
         setDocumentFileData(fileBuffer);
       } else {
-        // Plain text / markdown decoding
         const textDecoder = new TextDecoder("utf-8");
         const content = textDecoder.decode(fileBuffer);
         setDocumentText(content);
@@ -270,9 +309,9 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ onLogout }) 
     }
   };
 
-  // Audio Recording Flow (under Reader)
   const startRecording = async () => {
     setError(null);
+    cancelPendingSpeech();
     audioInputBuffersRef.current = [];
 
     try {
@@ -339,17 +378,12 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ onLogout }) 
         offset += b.length;
       }
 
-      // Keep the recording at the device's native rate: the backend resamples it to
-      // 16 kHz mono with an anti-aliased polyphase filter (PyAV) before calling Gnani.
-      // A naive in-browser decimation aliases high frequencies and degraded recognition.
       const wavBlob = encodeWAV(merged, inputRate);
 
-      // Process voice question automatically
       await handleProcessVoiceQuestion(wavBlob);
     }
   };
 
-  // Flow: Record -> POST /stt/transcribe -> Show transcript -> Auto-call POST /ask -> Auto-call POST /tts/speak
   const handleProcessVoiceQuestion = async (audioBlob: Blob) => {
     setTranscribing(true);
     setError(null);
@@ -359,7 +393,6 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ onLogout }) 
       const sttRes = await api.transcribeAudio(audioBlob, questionLanguage);
       transcribedText = (sttRes.transcript || "").trim();
       setTranscript(transcribedText);
-      // Show the language the STT provider actually detected/used.
       setDetectedLanguage(sttRes.language || null);
     } catch (err: any) {
       console.error("Transcription error:", err);
@@ -375,89 +408,41 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ onLogout }) 
       return;
     }
 
-    // Automatically trigger question answering
     await executeAskQuestion(transcribedText);
   };
 
   const executeAskQuestion = async (queryText: string) => {
     if (!queryText.trim() || !selectedChapter) return;
 
+    const requestId = ++askRequestIdRef.current;
+
     setAsking(true);
     setError(null);
 
-    let askAnswer = "";
-    let askSources: any[] = [];
-    let isGrounded = false;
-    let askDebug: any = null;
-
+    let res: any;
     try {
-      const res = await api.askQuestion(
+      res = await api.askQuestion(
         queryText,
         selectedChapter.id,
         answerLanguage,
         level,
         readerCurrentPage
       );
-
-      askAnswer = res.answer;
-      askSources = res.sources || [];
-      isGrounded = res.grounded;
-      askDebug = res.debug || null;
     } catch (err: any) {
+      if (requestId !== askRequestIdRef.current) return;
       console.error("Ask query error:", err);
       setError(err.message || "Failed to generate answer from study materials.");
       setAsking(false);
       return;
-    } finally {
-      setAsking(false);
     }
+    if (requestId !== askRequestIdRef.current) return;
+    setAsking(false);
 
-    // Call TTS speak with chosen voice and autoplay
-    setTtsLoading(true);
-    let audioB64: string | null = null;
-    let isCloned = false;
-    let isMock = false;
-    let fallback = false;
-    let notice: string | null = null;
-    let label: string | null = null;
-    let ttsError: string | null = null;
+    const askAnswer: string = res.answer;
+    const askSources: any[] = res.sources || [];
+    const isGrounded: boolean = res.grounded;
+    const askDebug: any = res.debug || null;
 
-    try {
-      const ttsRes = await api.speakText(askAnswer, selectedVoiceId, answerLanguage);
-      audioB64 = ttsRes.audio_base64;
-      isCloned = ttsRes.is_cloned;
-      isMock = ttsRes.is_mock;
-      fallback = ttsRes.fallback;
-      notice = ttsRes.notice;
-      label = ttsRes.label;
-
-      setLatestAudio({
-        base64: audioB64,
-        contentType: ttsRes.content_type || "audio/wav",
-        isCloned,
-        isMock,
-        fallback,
-        notice,
-        label,
-        error: null,
-      });
-    } catch (err: any) {
-      console.warn("TTS speak generation warning:", err);
-      ttsError = err.message || "Failed to synthesize speech audio.";
-      setLatestAudio({
-        base64: null,
-        isCloned: false,
-        isMock: false,
-        fallback: false,
-        notice: null,
-        label: null,
-        error: ttsError,
-      });
-    } finally {
-      setTtsLoading(false);
-    }
-
-    // Only the latest question and answer are kept: a new answer replaces the previous one.
     const userTurn: MessageTurn = {
       id: "u_" + Date.now(),
       role: "user",
@@ -473,18 +458,125 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ onLogout }) 
       sources: askSources,
       grounded: isGrounded,
       pageNumber: readerCurrentPage,
-      audioBase64: audioB64,
-      isCloned,
-      isMock,
-      fallback,
-      voiceNotice: notice,
-      voiceLabel: label,
-      audioError: ttsError,
+      audioBase64: null,
+      isCloned: false,
+      isMock: false,
+      fallback: false,
+      voiceNotice: null,
+      voiceLabel: null,
+      audioError: null,
       debug: askDebug,
       timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
     };
 
-    setConversation([userTurn, assistantTurn]);
+    setLatestExchange([userTurn, assistantTurn]);
+    setLatestAudio({
+      segments: [],
+      contentType: "audio/wav",
+      isCloned: false,
+      isMock: false,
+      fallback: false,
+      notice: null,
+      label: null,
+      error: null,
+      streaming: true,
+    });
+    setTtsLoading(true);
+
+    try {
+      const result = await synthesizeAnswerInParts(askAnswer, requestId);
+      if (!result) return;
+      const { meta } = result;
+      if (meta) {
+        setLatestExchange((prev) =>
+          prev.map((msg) =>
+            msg.id === assistantTurn.id
+              ? {
+                  ...msg,
+                  audioBase64: result.segments[0] ?? null,
+                  isCloned: meta.is_cloned,
+                  isMock: meta.is_mock,
+                  fallback: meta.fallback,
+                  voiceNotice: meta.notice,
+                  voiceLabel: meta.label,
+                  audioError: null,
+                }
+              : msg
+          )
+        );
+      }
+    } catch (err: any) {
+      if (requestId !== askRequestIdRef.current) return;
+      console.warn("TTS speak generation warning:", err);
+      const ttsError = err.message || "Failed to synthesize speech audio.";
+      setLatestAudio((prev) => ({
+        segments: prev?.segments ?? [],
+        contentType: prev?.contentType || "audio/wav",
+        isCloned: prev?.isCloned ?? false,
+        isMock: prev?.isMock,
+        fallback: prev?.fallback ?? false,
+        notice: prev?.notice ?? null,
+        label: prev?.label ?? null,
+        error: ttsError,
+        streaming: false,
+      }));
+      setLatestExchange((prev) =>
+        prev.map((msg) => (msg.id === assistantTurn.id ? { ...msg, audioError: ttsError } : msg))
+      );
+    } finally {
+      if (requestId === askRequestIdRef.current) setTtsLoading(false);
+    }
+  };
+
+  const synthesizeAnswerInParts = async (
+    answerText: string,
+    requestId: number
+  ): Promise<{ segments: string[]; meta: any } | null> => {
+    const parts = splitAnswerForSpeech(answerText);
+
+    if (parts.length === 0) {
+      setLatestAudio({
+        segments: [],
+        contentType: "audio/wav",
+        isCloned: false,
+        isMock: false,
+        fallback: false,
+        notice: null,
+        label: null,
+        error: "There is no speakable text in this answer.",
+        streaming: false,
+      });
+      return { segments: [], meta: null };
+    }
+
+    const segments: string[] = [];
+    let meta: any = null;
+
+    for (let i = 0; i < parts.length; i++) {
+      const ttsRes = await api.speakText(parts[i], selectedVoiceId, answerLanguage);
+      if (requestId !== askRequestIdRef.current) return null;
+      meta = ttsRes;
+      segments.push(ttsRes.audio_base64);
+      setLatestAudio({
+        segments: [...segments],
+        contentType: ttsRes.content_type || "audio/wav",
+        isCloned: ttsRes.is_cloned,
+        isMock: ttsRes.is_mock,
+        fallback: ttsRes.fallback,
+        notice: ttsRes.notice,
+        label: ttsRes.label,
+        error: null,
+        streaming: i !== parts.length - 1,
+      });
+    }
+
+    return { segments, meta };
+  };
+
+  const cancelPendingSpeech = () => {
+    askRequestIdRef.current += 1;
+    setTtsLoading(false);
+    setLatestAudio((prev) => (prev ? { ...prev, streaming: false } : prev));
   };
 
   const getVoiceName = (voiceId: number | null) => {
@@ -493,7 +585,6 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ onLogout }) 
     return v ? `${v.teacher_name} (${v.voice_name})` : "Default Educational Voice";
   };
 
-  // Play a short sample of a teacher's cloned voice (never a beep; errors are shown).
   const playVoiceSample = async (v: any) => {
     setError(null);
     setSampleLoadingId(v.id);
@@ -518,124 +609,105 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ onLogout }) 
     return `${mins.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}`;
   };
 
+  // Shared header for all steps
+  const AppHeader = ({ title, subtitle, back }: { title: string; subtitle?: string; back?: () => void }) => (
+    <header className="app-header">
+      <div className="header-left">
+        <LogoMark size={24} />
+        <div style={{ minWidth: 0 }}>
+          <div className="app-title">{title}</div>
+          {subtitle && <div className="app-subtitle">{subtitle}</div>}
+        </div>
+      </div>
+      <div className="header-right">
+        <UserMenu name={user?.name} role="Student" onLogout={handleLogout} />
+        {back && (
+          <button className="btn btn-ghost" onClick={back}>← Chapters</button>
+        )}
+      </div>
+    </header>
+  );
+
   // ==========================================
   // RENDER STEP 1: Subject & Chapter Selection
   // ==========================================
   if (currentStep === "SELECT_MATERIAL") {
     return (
-      <div style={{ minHeight: "100vh", background: "#f4f6f8", fontFamily: "system-ui, -apple-system, sans-serif" }}>
-        {/* Top Header */}
-        <header style={{ background: "#fff", borderBottom: "1px solid #dee2e6", padding: "1rem 2rem", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <div>
-            <h2 style={{ margin: 0, color: "#198754" }}>🎓 ShikshaSaathi Student Voice Portal</h2>
-            {user && <p style={{ margin: "0.2rem 0 0", color: "#666", fontSize: "0.9rem" }}>Logged in as <strong>{user.name}</strong> (Student)</p>}
-          </div>
-          <button
-            onClick={handleLogout}
-            style={{ padding: "0.5rem 1rem", background: "#dc3545", color: "#fff", border: "none", borderRadius: "6px", cursor: "pointer", fontWeight: 500 }}
-          >
-            Sign Out
-          </button>
-        </header>
+      <div className="app-shell">
+        <Aurora dim />
+        <AppHeader title="ShikshaSaathi Student Voice Portal" subtitle={user ? `Logged in as ${user.name}` : undefined} />
+        <main style={{ flex: 1, padding: "32px 24px", overflowY: "auto" }}>
+          <div style={{ maxWidth: 800, margin: "0 auto" }}>
+            <div className="card">
+              <h3 style={{ marginTop: 0 }}>📚 Choose Study Material</h3>
+              <p className="text-muted" style={{ fontSize: "0.9rem", marginBottom: 20 }}>
+                Select a subject and chapter to start your voice-guided interactive learning session. Only chapters with verified study materials are listed.
+              </p>
 
-        <main style={{ maxWidth: "800px", margin: "2.5rem auto", padding: "0 1.5rem" }}>
-          <div style={{ background: "#fff", borderRadius: "12px", padding: "2rem", boxShadow: "0 4px 16px rgba(0,0,0,0.06)" }}>
-            <h3 style={{ marginTop: 0, color: "#333" }}>📚 Choose Study Material</h3>
-            <p style={{ color: "#666", fontSize: "0.95rem", marginBottom: "1.5rem" }}>
-              Select a subject and chapter to start your voice-guided interactive learning session. Only chapters with verified study materials are listed.
-            </p>
+              {error && <div className="banner banner-danger" role="alert">{error}</div>}
 
-            {error && (
-              <div style={{ background: "#f8d7da", color: "#842029", padding: "0.75rem 1rem", borderRadius: "6px", marginBottom: "1.5rem", border: "1px solid #f5c2c7" }}>
-                {error}
+              <div className="field">
+                <label className="field-label">1. Select Subject</label>
+                <select
+                  className="select"
+                  value={selectedSubject?.id || ""}
+                  onChange={(e) => {
+                    const s = subjects.find((sub) => sub.id === Number(e.target.value));
+                    if (s) handleSelectSubject(s);
+                    else {
+                      setSelectedSubject(null);
+                      setChapters([]);
+                      setSelectedChapter(null);
+                    }
+                  }}
+                >
+                  <option value="">-- Choose a Subject --</option>
+                  {subjects.map((s) => (
+                    <option key={s.id} value={s.id}>{s.name}</option>
+                  ))}
+                </select>
               </div>
-            )}
 
-            {/* Subject Selector */}
-            <div style={{ marginBottom: "1.5rem" }}>
-              <label style={{ display: "block", fontWeight: 600, marginBottom: "0.5rem" }}>1. Select Subject</label>
-              <select
-                value={selectedSubject?.id || ""}
-                onChange={(e) => {
-                  const s = subjects.find((sub) => sub.id === Number(e.target.value));
-                  if (s) handleSelectSubject(s);
-                  else {
-                    setSelectedSubject(null);
-                    setChapters([]);
-                    setSelectedChapter(null);
-                  }
-                }}
-                style={{ width: "100%", padding: "0.75rem", borderRadius: "6px", border: "1px solid #ced4da", fontSize: "1rem" }}
-              >
-                <option value="">-- Choose a Subject --</option>
-                {subjects.map((s) => (
-                  <option key={s.id} value={s.id}>{s.name}</option>
-                ))}
-              </select>
-            </div>
-
-            {/* Chapter Selector (only chapters with ready documents) */}
-            {selectedSubject && (
-              <div style={{ marginBottom: "2rem" }}>
-                <label style={{ display: "block", fontWeight: 600, marginBottom: "0.5rem" }}>2. Select Chapter</label>
-                {chapters.length === 0 ? (
-                  <div style={{ padding: "1rem", background: "#f8f9fa", borderRadius: "6px", color: "#666", fontSize: "0.95rem" }}>
-                    No chapters with ready study materials available in {selectedSubject.name}.
-                  </div>
-                ) : (
-                  <div style={{ display: "grid", gap: "0.75rem" }}>
-                    {chapters.map((chap) => {
-                      const isSelected = selectedChapter?.id === chap.id;
-                      return (
-                        <div
-                          key={chap.id}
-                          onClick={() => handleSelectChapter(chap)}
-                          style={{
-                            padding: "1rem",
-                            border: `2px solid ${isSelected ? "#198754" : "#dee2e6"}`,
-                            background: isSelected ? "#e8f5e9" : "#fff",
-                            borderRadius: "8px",
-                            cursor: "pointer",
-                            display: "flex",
-                            alignItems: "center",
-                            justifyContent: "space-between",
-                            transition: "all 0.2s ease",
-                          }}
-                        >
-                          <div>
-                            <div style={{ fontWeight: 600, fontSize: "1.05rem", color: isSelected ? "#198754" : "#212529" }}>
-                              Chapter {chap.order}: {chap.title}
+              {selectedSubject && (
+                <div className="field">
+                  <label className="field-label">2. Select Chapter</label>
+                  {chapters.length === 0 ? (
+                    <div className="surface" style={{ padding: 16, color: "var(--color-text-muted)", fontSize: "0.9rem" }}>
+                      No chapters with ready study materials available in {selectedSubject.name}.
+                    </div>
+                  ) : (
+                    <div style={{ display: "grid", gap: 8 }}>
+                      {chapters.map((chap) => {
+                        const isSelected = selectedChapter?.id === chap.id;
+                        return (
+                          <div
+                            key={chap.id}
+                            onClick={() => handleSelectChapter(chap)}
+                            className={`list-item${isSelected ? " active" : ""}`}
+                          >
+                            <div>
+                              <div className="item-name">Chapter {chap.order}: {chap.title}</div>
+                              <div className="item-meta">Verified ready study material available</div>
                             </div>
-                            <div style={{ fontSize: "0.85rem", color: "#666", marginTop: "0.25rem" }}>
-                              Verified ready study material available
-                            </div>
+                            <span style={{ color: isSelected ? "var(--color-accent)" : "var(--color-text-dim)" }}>
+                              {isSelected ? "✓" : "➔"}
+                            </span>
                           </div>
-                          <span style={{ fontSize: "1.2rem" }}>{isSelected ? "✅" : "➔"}</span>
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-            )}
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              )}
 
-            <button
-              onClick={handleProceedToVoiceSelection}
-              disabled={!selectedChapter}
-              style={{
-                width: "100%",
-                padding: "0.85rem",
-                background: selectedChapter ? "#198754" : "#6c757d",
-                color: "#fff",
-                border: "none",
-                borderRadius: "6px",
-                fontWeight: "bold",
-                fontSize: "1.05rem",
-                cursor: selectedChapter ? "pointer" : "not-allowed",
-              }}
-            >
-              Continue to Choose Teacher Voice ➔
-            </button>
+              <button
+                onClick={handleProceedToVoiceSelection}
+                disabled={!selectedChapter}
+                className="btn btn-primary w-full"
+              >
+                Continue to Choose Teacher Voice <ArrowRight />
+              </button>
+            </div>
           </div>
         </main>
       </div>
@@ -647,135 +719,84 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ onLogout }) 
   // ==========================================
   if (currentStep === "CHOOSE_VOICE") {
     return (
-      <div style={{ minHeight: "100vh", background: "#f4f6f8", fontFamily: "system-ui, -apple-system, sans-serif" }}>
-        <header style={{ background: "#fff", borderBottom: "1px solid #dee2e6", padding: "1rem 2rem", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <div>
-            <button
-              onClick={() => setCurrentStep("SELECT_MATERIAL")}
-              style={{ background: "none", border: "none", color: "#0d6efd", cursor: "pointer", fontSize: "0.9rem", padding: 0, marginBottom: "0.25rem" }}
-            >
-              ← Back to Material Selection
-            </button>
-            <h2 style={{ margin: 0 }}>🎙️ Step 2: Choose Teacher Voice</h2>
-          </div>
-          <button
-            onClick={handleLogout}
-            style={{ padding: "0.5rem 1rem", background: "#dc3545", color: "#fff", border: "none", borderRadius: "6px", cursor: "pointer", fontWeight: 500 }}
-          >
-            Sign Out
-          </button>
-        </header>
+      <div className="app-shell">
+        <Aurora dim />
+        <AppHeader
+          title="Step 2: Choose Teacher Voice"
+          subtitle={user ? `Logged in as ${user.name}` : undefined}
+        />
+        <main style={{ flex: 1, padding: "32px 24px", overflowY: "auto" }}>
+          <div style={{ maxWidth: 800, margin: "0 auto" }}>
+            <div className="card">
+              <h3 style={{ marginTop: 0 }}>Choose How Your AI Tutor Speaks</h3>
+              <p className="text-muted" style={{ fontSize: "0.9rem", marginBottom: 20 }}>
+                Select your preferred voice for answers. You can choose the default standard voice or an authorized cloned voice from teachers who have explicitly granted consent.
+              </p>
 
-        <main style={{ maxWidth: "800px", margin: "2.5rem auto", padding: "0 1.5rem" }}>
-          <div style={{ background: "#fff", borderRadius: "12px", padding: "2rem", boxShadow: "0 4px 16px rgba(0,0,0,0.06)" }}>
-            <h3 style={{ marginTop: 0, color: "#333" }}>Choose How Your AI Tutor Speaks</h3>
-            <p style={{ color: "#666", fontSize: "0.95rem", marginBottom: "1.5rem" }}>
-              Select your preferred voice for answers. You can choose the default standard voice or an authorized cloned voice from teachers who have explicitly granted consent.
-            </p>
-
-            <div style={{ display: "grid", gap: "1rem", marginBottom: "2rem" }}>
-              {/* Option 1: Default Voice */}
-              <div
-                onClick={() => setSelectedVoiceId(null)}
-                style={{
-                  padding: "1.2rem",
-                  border: `2px solid ${selectedVoiceId === null ? "#0d6efd" : "#dee2e6"}`,
-                  background: selectedVoiceId === null ? "#e7f1ff" : "#fff",
-                  borderRadius: "8px",
-                  cursor: "pointer",
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "space-between",
-                }}
-              >
-                <div>
-                  <div style={{ fontWeight: 600, fontSize: "1.1rem", color: selectedVoiceId === null ? "#0d6efd" : "#212529" }}>
-                    🤖 Default AI Voice (Standard)
+              <div style={{ display: "grid", gap: 12, marginBottom: 24 }}>
+                <div
+                  onClick={() => setSelectedVoiceId(null)}
+                  className={`voice-card${selectedVoiceId === null ? " active" : ""}`}
+                >
+                  <div>
+                    <div className="item-name">🤖 Default AI Voice (Standard)</div>
+                    <div className="item-meta">Clear, natural, multilingual educational voice tuned for easy comprehension.</div>
                   </div>
-                  <div style={{ color: "#666", fontSize: "0.85rem", marginTop: "0.3rem" }}>
-                    Clear, natural, multilingual educational voice tuned for easy comprehension.
-                  </div>
+                  <span className="badge badge-accent">{selectedVoiceId === null ? "Selected" : "Choose"}</span>
                 </div>
-                <span style={{ fontSize: "1.3rem" }}>{selectedVoiceId === null ? "🔘" : "⚪"}</span>
-              </div>
 
-              {/* Option 2+: Active Teacher Cloned Voices with confirmed consent */}
-              {voices.map((v) => {
-                const isSelected = selectedVoiceId === v.id;
-                return (
-                  <div
-                    key={v.id}
-                    onClick={() => setSelectedVoiceId(v.id)}
-                    style={{
-                      padding: "1.2rem",
-                      border: `2px solid ${isSelected ? "#198754" : "#dee2e6"}`,
-                      background: isSelected ? "#e8f5e9" : "#fff",
-                      borderRadius: "8px",
-                      cursor: "pointer",
-                      display: "flex",
-                      alignItems: "center",
-                      justifyContent: "space-between",
-                    }}
-                  >
-                    <div>
-                      <div style={{ display: "flex", alignItems: "center", gap: "0.6rem" }}>
-                        <span style={{ fontWeight: 600, fontSize: "1.1rem", color: isSelected ? "#198754" : "#212529" }}>
-                          👨‍🏫 {v.teacher_name}'s Voice
-                        </span>
-                        <span style={{ background: "#d1e7dd", color: "#0f5132", fontSize: "0.75rem", padding: "0.2rem 0.5rem", borderRadius: "12px", fontWeight: "bold" }}>
+                {voices.map((v) => {
+                  const isSelected = selectedVoiceId === v.id;
+                  return (
+                    <div
+                      key={v.id}
+                      onClick={() => setSelectedVoiceId(v.id)}
+                      className={`voice-card${isSelected ? " active" : ""}`}
+                    >
+                      <div>
+                        <div className="item-name">👨‍🏫 {v.teacher_name}'s Voice</div>
+                        <div className="item-meta">
+                          Voice Profile: <em>{v.voice_name}</em> • AI-generated voice, authorized by the teacher.
+                        </div>
+                        <span className="badge badge-accent" style={{ marginTop: 6 }}>
                           Authorized Cloned Voice
                         </span>
                       </div>
-                      <div style={{ color: "#666", fontSize: "0.85rem", marginTop: "0.4rem" }}>
-                        Voice Profile: <em>{v.voice_name}</em> • AI-generated voice, authorized by the teacher.
-                      </div>
-                    </div>
-                    <div style={{ display: "flex", alignItems: "center", gap: "0.6rem" }}>
                       <button
                         type="button"
                         data-testid={`sample-voice-${v.id}`}
                         onClick={(e) => { e.stopPropagation(); playVoiceSample(v); }}
                         disabled={sampleLoadingId === v.id}
-                        style={{ padding: "0.35rem 0.7rem", background: "#0d6efd", color: "#fff", border: "none", borderRadius: "4px", fontSize: "0.8rem", cursor: "pointer" }}
+                        className="btn btn-secondary"
+                        style={{ padding: "0.35rem 0.7rem", fontSize: "0.8rem" }}
                       >
                         {sampleLoadingId === v.id ? "Loading..." : "🔊 Sample"}
                       </button>
-                      <span style={{ fontSize: "1.3rem" }}>{isSelected ? "🔘" : "⚪"}</span>
                     </div>
-                  </div>
-                );
-              })}
-            </div>
-
-            {sampleAudio && (
-              <div style={{ marginBottom: "1.5rem" }}>
-                <AudioPlayer
-                  audioBase64={sampleAudio.base64}
-                  contentType={sampleAudio.contentType || "audio/wav"}
-                  isCloned={true}
-                  isMock={sampleAudio.isMock}
-                  label={sampleAudio.label}
-                  autoPlay={true}
-                />
+                  );
+                })}
               </div>
-            )}
 
-            <button
-              onClick={() => handleSaveVoiceAndOpenReader(selectedVoiceId)}
-              style={{
-                width: "100%",
-                padding: "0.85rem",
-                background: "#0d6efd",
-                color: "#fff",
-                border: "none",
-                borderRadius: "6px",
-                fontWeight: "bold",
-                fontSize: "1.05rem",
-                cursor: "pointer",
-              }}
-            >
-              Save Preference & Open Study Reader 📖
-            </button>
+              {sampleAudio && (
+                <div style={{ marginBottom: 16 }}>
+                  <AudioPlayer
+                    audioBase64={sampleAudio.base64}
+                    contentType={sampleAudio.contentType || "audio/wav"}
+                    isCloned={true}
+                    isMock={sampleAudio.isMock}
+                    label={sampleAudio.label}
+                    autoPlay={true}
+                  />
+                </div>
+              )}
+
+              <button
+                onClick={() => handleSaveVoiceAndOpenReader(selectedVoiceId)}
+                className="btn btn-primary w-full"
+              >
+                Save Preference & Open Study Reader 📖
+              </button>
+            </div>
           </div>
         </main>
       </div>
@@ -785,121 +806,46 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ onLogout }) 
   // ==========================================
   // RENDER STEP 3: Study Reader & Voice Tutor
   // ==========================================
+  const latestAssistant = latestExchange.find((turn) => turn.role === "assistant");
+
   return (
-    <div style={{ display: "flex", flexDirection: "column", height: "100vh", background: "#f8f9fa", fontFamily: "system-ui, -apple-system, sans-serif" }}>
-      {/* Study Page Header with Chapter Info & Voice Switcher */}
-      <header
-        style={{
-          background: "#fff",
-          borderBottom: "1px solid #dee2e6",
-          padding: "0.75rem 1.5rem",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          boxShadow: "0 2px 4px rgba(0,0,0,0.04)",
-          zIndex: 10,
-        }}
-      >
-        <div style={{ display: "flex", alignItems: "center", gap: "1rem" }}>
-          <button
-            onClick={() => setCurrentStep("SELECT_MATERIAL")}
-            style={{
-              padding: "0.4rem 0.8rem",
-              background: "#e9ecef",
-              border: "1px solid #ced4da",
-              borderRadius: "4px",
-              cursor: "pointer",
-              fontSize: "0.85rem",
-              fontWeight: 500,
-            }}
-          >
-            ← Chapters
-          </button>
-          <div>
-            <h3 style={{ margin: 0, fontSize: "1.1rem", color: "#212529" }}>
+    <div className="app-shell">
+      <Aurora dim />
+      <header className="app-header">
+        <div className="header-left">
+          <LogoMark size={24} />
+          <div style={{ minWidth: 0 }}>
+            <div className="app-title">
               {selectedSubject?.name} • Chapter {selectedChapter?.order}: {selectedChapter?.title}
-            </h3>
+            </div>
             {readyDocument && (
-              <span style={{ fontSize: "0.8rem", color: "#666" }}>
+              <div className="app-subtitle">
                 📄 {readyDocument.filename} {readyDocument.filename.toLowerCase().endsWith(".pdf") ? `(Page ${readerCurrentPage} of ${readerTotalPages})` : ""}
-              </span>
+              </div>
             )}
           </div>
         </div>
-
-        {/* Header Voice Indicator with Change Action */}
-        <div style={{ display: "flex", alignItems: "center", gap: "1rem" }}>
-          <div
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: "0.5rem",
-              background: "#e7f1ff",
-              border: "1px solid #b6d4fe",
-              padding: "0.35rem 0.75rem",
-              borderRadius: "20px",
-              fontSize: "0.85rem",
-            }}
-          >
-            <span>🎙️</span>
-            <span>
-              Voice: <strong>{getVoiceName(selectedVoiceId)}</strong>
-            </span>
-            <button
-              onClick={() => setShowVoiceModal(true)}
-              style={{
-                marginLeft: "0.4rem",
-                background: "#0d6efd",
-                color: "#fff",
-                border: "none",
-                borderRadius: "12px",
-                padding: "0.15rem 0.5rem",
-                fontSize: "0.75rem",
-                cursor: "pointer",
-              }}
-            >
-              Change
-            </button>
-          </div>
-
-          <button
-            onClick={handleLogout}
-            style={{ padding: "0.4rem 0.8rem", background: "#dc3545", color: "#fff", border: "none", borderRadius: "4px", cursor: "pointer", fontSize: "0.85rem" }}
-          >
-            Sign Out
-          </button>
+        <div className="header-right">
+          <span className="badge badge-muted">
+            🎙️ Voice: <strong style={{ color: "var(--color-text)" }}>{getVoiceName(selectedVoiceId)}</strong>
+          </span>
+          <button className="btn btn-ghost" onClick={() => setShowVoiceModal(true)}>Change</button>
+          <UserMenu name={user?.name} role="Student" onLogout={handleLogout} />
         </div>
       </header>
 
-      {/* Voice Switcher Modal (accessible from Header) */}
+      {/* Voice Switcher Modal */}
       {showVoiceModal && (
-        <div
-          style={{
-            position: "fixed",
-            top: 0,
-            left: 0,
-            right: 0,
-            bottom: 0,
-            background: "rgba(0,0,0,0.5)",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            zIndex: 1000,
-          }}
-        >
-          <div style={{ background: "#fff", borderRadius: "12px", padding: "1.75rem", maxWidth: "550px", width: "90%", maxHeight: "80vh", overflowY: "auto" }}>
+        <div className="modal-overlay" onClick={() => setShowVoiceModal(false)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
             <h3 style={{ marginTop: 0 }}>Change Tutor Voice</h3>
-            <p style={{ color: "#666", fontSize: "0.9rem" }}>Select the voice you want to hear for this study session:</p>
-            <div style={{ display: "grid", gap: "0.75rem", margin: "1rem 0 1.5rem" }}>
+            <p className="text-muted" style={{ fontSize: "0.88rem", marginBottom: 16 }}>
+              Select the voice you want to hear for this study session:
+            </p>
+            <div style={{ display: "grid", gap: 8, marginBottom: 16 }}>
               <div
                 onClick={() => handleSaveVoiceAndOpenReader(null)}
-                style={{
-                  padding: "0.75rem",
-                  border: `2px solid ${selectedVoiceId === null ? "#0d6efd" : "#dee2e6"}`,
-                  borderRadius: "6px",
-                  cursor: "pointer",
-                  background: selectedVoiceId === null ? "#e7f1ff" : "#fff",
-                }}
+                className={`voice-card${selectedVoiceId === null ? " active" : ""}`}
               >
                 <strong>🤖 Default Educational Voice</strong>
               </div>
@@ -907,86 +853,87 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ onLogout }) 
                 <div
                   key={v.id}
                   onClick={() => handleSaveVoiceAndOpenReader(v.id)}
-                  style={{
-                    padding: "0.75rem",
-                    border: `2px solid ${selectedVoiceId === v.id ? "#198754" : "#dee2e6"}`,
-                    borderRadius: "6px",
-                    cursor: "pointer",
-                    background: selectedVoiceId === v.id ? "#e8f5e9" : "#fff",
-                  }}
+                  className={`voice-card${selectedVoiceId === v.id ? " active" : ""}`}
                 >
-                  <strong>👨‍🏫 {v.teacher_name}'s Voice</strong> ({v.voice_name})
-                  <div style={{ fontSize: "0.8rem", color: "#198754", marginTop: "0.2rem" }}>Authorized Cloned Voice</div>
+                  <div>
+                    <strong>👨‍🏫 {v.teacher_name}'s Voice</strong> ({v.voice_name})
+                    <div className="item-meta" style={{ marginTop: 4 }}>Authorized Cloned Voice</div>
+                  </div>
                   <button
                     type="button"
                     data-testid={`modal-sample-voice-${v.id}`}
                     onClick={(e) => { e.stopPropagation(); playVoiceSample(v); }}
                     disabled={sampleLoadingId === v.id}
-                    style={{ marginTop: "0.4rem", padding: "0.3rem 0.6rem", background: "#0d6efd", color: "#fff", border: "none", borderRadius: "4px", fontSize: "0.75rem", cursor: "pointer" }}
+                    className="btn btn-secondary"
+                    style={{ padding: "0.3rem 0.6rem", fontSize: "0.75rem" }}
                   >
                     {sampleLoadingId === v.id ? "Loading..." : "🔊 Sample"}
                   </button>
                 </div>
               ))}
             </div>
-            <button
-              onClick={() => setShowVoiceModal(false)}
-              style={{ padding: "0.5rem 1rem", background: "#6c757d", color: "#fff", border: "none", borderRadius: "4px", cursor: "pointer" }}
-            >
-              Close
-            </button>
+            <button className="btn btn-ghost" onClick={() => setShowVoiceModal(false)}>Close</button>
           </div>
         </div>
       )}
 
-      {/* Main Split Layout: Left/Top = Document Reader, Right/Bottom = Voice Question Studio */}
-      <div style={{ display: "grid", gridTemplateColumns: "1.2fr 1fr", flex: 1, overflow: "hidden" }}>
+      <div className="study-layout">
         {/* Document Reader Container */}
-        <div style={{ borderRight: "1px solid #dee2e6", display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
+        <div className="reader-col">
           {docLoading && (
-            <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", color: "#666" }}>
-              <p>⏳ Loading document material...</p>
+            <div className="document-loading" role="status" aria-label="Loading study material">
+              <span className="skeleton document-loading-page" aria-hidden="true" />
+              <span>Loading study material…</span>
             </div>
           )}
 
           {!docLoading && documentFileData && (
-            <PdfReader
-              fileData={documentFileData}
-              initialPage={1}
-              onPageChange={(curr, total) => {
-                setReaderCurrentPage(curr);
-                setReaderTotalPages(total);
-              }}
-            />
+            <div className="pdf-frame">
+              <Suspense
+                fallback={
+                  <div className="pdf-loading" role="status">
+                    <span className="skeleton pdf-loading-page" aria-hidden="true" />
+                    <span>Preparing the PDF reader...</span>
+                  </div>
+                }
+              >
+                <PdfReader
+                  fileData={documentFileData}
+                  initialPage={1}
+                  onPageChange={(curr, total) => {
+                    setReaderCurrentPage(curr);
+                    setReaderTotalPages(total);
+                  }}
+                />
+              </Suspense>
+            </div>
           )}
 
           {!docLoading && documentText && (
-            <div style={{ flex: 1, padding: "2rem", overflowY: "auto", background: "#fff", lineHeight: 1.7, fontSize: "1.05rem", color: "#212529" }}>
-              <div style={{ maxWidth: "700px", margin: "0 auto", whiteSpace: "pre-wrap" }}>
+            <div style={{ flex: 1, padding: 32, overflowY: "auto", background: "#fff", color: "#1a1a1a", lineHeight: 1.7, fontSize: "1.05rem" }}>
+              <div style={{ maxWidth: 700, margin: "0 auto", whiteSpace: "pre-wrap" }}>
                 {documentText}
               </div>
             </div>
           )}
         </div>
 
-        {/* Voice Tutor & Interactive Question Studio */}
-        <div style={{ display: "flex", flexDirection: "column", height: "100%", overflowY: "auto", background: "#fff", padding: "1.5rem" }}>
-          <h3 style={{ margin: "0 0 0.5rem", color: "#212529" }}>🎙️ Ask AI Tutor by Voice</h3>
-          <p style={{ color: "#666", fontSize: "0.85rem", margin: "0 0 1rem" }}>
+        {/* Voice Tutor */}
+        <div className="tutor-col">
+          <h3 style={{ margin: "0 0 4px" }}>🎙️ Ask AI Tutor by Voice</h3>
+          <p className="text-muted" style={{ fontSize: "0.82rem", margin: "0 0 16px" }}>
             Press record to speak your question. The tutor uses your open chapter (and active page {readerCurrentPage}) to generate grounded answers.
           </p>
 
-          {/* Language & Level Selector */}
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.75rem", marginBottom: "0.75rem" }}>
-            <div>
-              <label style={{ fontSize: "0.8rem", fontWeight: 600, display: "block", marginBottom: "0.25rem" }}>
-                I Will Speak In (Question Language)
-              </label>
+          {/* Language & Level Selectors */}
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 12 }}>
+            <div className="field" style={{ marginBottom: 0 }}>
+              <label className="field-label">I Will Speak In (Question Language)</label>
               <select
                 data-testid="question-language-select"
+                className="select"
                 value={questionLanguage}
                 onChange={(e) => handleQuestionLanguageChange(e.target.value)}
-                style={{ width: "100%", padding: "0.4rem", borderRadius: "4px", border: "1px solid #ced4da", fontSize: "0.85rem" }}
               >
                 <option value="indic-auto">Auto-detect (match my voice)</option>
                 <option value="en">English</option>
@@ -1002,12 +949,12 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ onLogout }) 
               </select>
             </div>
 
-            <div>
-              <label style={{ fontSize: "0.8rem", fontWeight: 600, display: "block", marginBottom: "0.25rem" }}>Answer Language (Tutor's Reply)</label>
+            <div className="field" style={{ marginBottom: 0 }}>
+              <label className="field-label">Answer Language (Tutor's Reply)</label>
               <select
+                className="select"
                 value={answerLanguage}
                 onChange={(e) => setAnswerLanguage(e.target.value)}
-                style={{ width: "100%", padding: "0.4rem", borderRadius: "4px", border: "1px solid #ced4da", fontSize: "0.85rem" }}
               >
                 <option value="en">English</option>
                 <option value="indic-auto">Auto-detect (Match my voice)</option>
@@ -1025,12 +972,12 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ onLogout }) 
             </div>
           </div>
 
-          <div style={{ marginBottom: "1rem" }}>
-            <label style={{ fontSize: "0.8rem", fontWeight: 600, display: "block", marginBottom: "0.25rem" }}>Explanation Level</label>
+          <div className="field">
+            <label className="field-label">Explanation Level</label>
             <select
+              className="select"
               value={level}
               onChange={(e) => setLevel(e.target.value)}
-              style={{ width: "100%", padding: "0.4rem", borderRadius: "4px", border: "1px solid #ced4da", fontSize: "0.85rem" }}
             >
               <option value="beginner">Beginner (Simple & examples)</option>
               <option value="intermediate">Intermediate (Standard)</option>
@@ -1038,94 +985,56 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ onLogout }) 
             </select>
           </div>
 
-          {/* Recording & Action Controls */}
-          <div style={{ background: "#f8f9fa", border: "1px solid #e9ecef", borderRadius: "8px", padding: "1rem", marginBottom: "1rem" }}>
-            <div style={{ display: "flex", alignItems: "center", gap: "1rem", marginBottom: "0.75rem" }}>
-              {!recording ? (
-                <button
-                  onClick={startRecording}
-                  disabled={transcribing || asking}
-                  style={{
-                    padding: "0.7rem 1.4rem",
-                    background: "#28a745",
-                    color: "#fff",
-                    border: "none",
-                    borderRadius: "24px",
-                    fontWeight: "bold",
-                    fontSize: "0.95rem",
-                    cursor: transcribing || asking ? "not-allowed" : "pointer",
-                    display: "flex",
-                    alignItems: "center",
-                    gap: "0.5rem",
-                    boxShadow: "0 2px 6px rgba(40,167,69,0.3)",
-                  }}
-                >
-                  🎙️ Ask Question
-                </button>
-              ) : (
-                <button
-                  onClick={stopRecording}
-                  style={{
-                    padding: "0.7rem 1.4rem",
-                    background: "#dc3545",
-                    color: "#fff",
-                    border: "none",
-                    borderRadius: "24px",
-                    fontWeight: "bold",
-                    fontSize: "0.95rem",
-                    cursor: "pointer",
-                    display: "flex",
-                    alignItems: "center",
-                    gap: "0.5rem",
-                    boxShadow: "0 2px 6px rgba(220,53,69,0.3)",
-                  }}
-                >
-                  ⏹️ Stop & Ask ({formatSec(seconds)})
-                </button>
-              )}
-
-              {recording && (
-                <span style={{ color: "#dc3545", fontWeight: 600, fontSize: "0.9rem" }}>
-                  ● Recording in progress... speak your question
-                </span>
-              )}
+          {/* Sticky voice panel */}
+          <div className="voice-panel">
+            <div style={{ display: "flex", alignItems: "center", gap: 16, marginBottom: 12 }}>
+              <button
+                onClick={recording ? stopRecording : startRecording}
+                disabled={transcribing || asking}
+                className={`mic-button${recording ? " recording" : ""}`}
+                aria-label={recording ? "Stop recording" : "Start recording"}
+              >
+                {recording ? "⏹" : "🎙"}
+              </button>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                {recording ? (
+                  <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                    <span className="badge badge-danger">● Recording {formatSec(seconds)}</span>
+                    <div className="level-bars" aria-hidden="true">
+                      {Array.from({ length: 12 }).map((_, i) => <span key={i} />)}
+                    </div>
+                  </div>
+                ) : (
+                  <div className="text-dim" style={{ fontSize: "0.82rem" }}>
+                    {transcribing ? "Transcribing..." : asking ? "Generating answer..." : "Press the mic to ask a question"}
+                  </div>
+                )}
+              </div>
             </div>
 
-            {/* Editable Transcript Box */}
+            {/* Editable Transcript */}
             <div>
-              <label style={{ fontSize: "0.85rem", fontWeight: 600, color: "#495057", display: "block", marginBottom: "0.25rem" }}>
+              <label className="field-label" style={{ marginBottom: 4 }}>
                 Question Transcript (Editable):
                 {detectedLanguage && (
-                  <span
-                    data-testid="detected-language"
-                    style={{ marginLeft: "0.5rem", fontWeight: 500, color: "#0d6efd", fontSize: "0.8rem" }}
-                  >
+                  <span data-testid="detected-language" style={{ marginLeft: 8, fontWeight: 500, color: "var(--color-accent)", fontSize: "0.8rem" }}>
                     Detected language: {detectedLanguage}
                   </span>
                 )}
               </label>
               <textarea
+                className="textarea"
                 value={transcript}
                 onChange={(e) => setTranscript(e.target.value)}
                 placeholder={transcribing ? "Transcribing your voice question..." : "Speak using the mic or type your question here..."}
                 rows={3}
-                style={{ width: "100%", padding: "0.6rem", borderRadius: "6px", border: "1px solid #ced4da", fontSize: "0.95rem", boxSizing: "border-box" }}
               />
-
-              <div style={{ display: "flex", justifyContent: "flex-end", marginTop: "0.5rem" }}>
+              <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 8 }}>
                 <button
                   onClick={() => executeAskQuestion(transcript)}
                   disabled={asking || !transcript.trim() || transcribing}
-                  style={{
-                    padding: "0.45rem 1rem",
-                    background: "#0d6efd",
-                    color: "#fff",
-                    border: "none",
-                    borderRadius: "4px",
-                    fontWeight: 600,
-                    cursor: asking || !transcript.trim() ? "not-allowed" : "pointer",
-                    fontSize: "0.85rem",
-                  }}
+                  className="btn btn-secondary"
+                  style={{ padding: "0.4rem 1rem", fontSize: "0.82rem" }}
                 >
                   {asking ? "⏳ Generating..." : "✏️ Edit & Resend Question"}
                 </button>
@@ -1133,16 +1042,12 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ onLogout }) 
             </div>
           </div>
 
-          {error && (
-            <div style={{ background: "#f8d7da", color: "#842029", padding: "0.75rem", borderRadius: "6px", marginBottom: "1rem", fontSize: "0.9rem" }}>
-              ⚠️ {error}
-            </div>
-          )}
+          {error && <div className="banner banner-danger" role="alert">⚠️ {error}</div>}
 
-          {/* Autoplay Audio Player for latest answer */}
+          {/* Latest answer audio player */}
           {latestAudio && (
             <AudioPlayer
-              audioBase64={latestAudio.base64}
+              segments={latestAudio.segments}
               contentType={latestAudio.contentType || "audio/wav"}
               isCloned={latestAudio.isCloned}
               isMock={latestAudio.isMock}
@@ -1150,166 +1055,125 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ onLogout }) 
               notice={latestAudio.notice}
               label={latestAudio.label}
               loading={ttsLoading}
+              streaming={latestAudio.streaming}
               error={latestAudio.error}
               autoPlay={true}
               onRetry={() => {
-                const lastAns = conversation.filter((c) => c.role === "assistant").slice(-1)[0]?.answer;
-                if (lastAns) {
-                  setTtsLoading(true);
-                  api.speakText(lastAns, selectedVoiceId, answerLanguage)
-                    .then((res) => {
-                      setLatestAudio({
-                        base64: res.audio_base64,
-                        contentType: res.content_type || "audio/wav",
-                        isCloned: res.is_cloned,
-                        isMock: res.is_mock,
-                        fallback: res.fallback,
-                        notice: res.notice,
-                        label: res.label,
-                        error: null,
-                      });
-                    })
-                    .catch((err: any) => {
-                      setLatestAudio({
-                        base64: null,
-                        isCloned: false,
-                        isMock: false,
-                        fallback: false,
-                        notice: null,
-                        label: null,
-                        error: err.message || "Failed to generate speech audio.",
-                      });
-                    })
-                    .finally(() => setTtsLoading(false));
-                }
+                const lastAns = latestExchange.find((turn) => turn.role === "assistant")?.answer;
+                if (!lastAns) return;
+                const retryId = ++askRequestIdRef.current;
+                setTtsLoading(true);
+                setLatestAudio({
+                  segments: [],
+                  contentType: "audio/wav",
+                  isCloned: false,
+                  isMock: false,
+                  fallback: false,
+                  notice: null,
+                  label: null,
+                  error: null,
+                  streaming: true,
+                });
+                synthesizeAnswerInParts(lastAns, retryId)
+                  .catch((err: any) => {
+                    if (retryId !== askRequestIdRef.current) return;
+                    setLatestAudio((prev) => ({
+                      segments: prev?.segments ?? [],
+                      contentType: prev?.contentType || "audio/wav",
+                      isCloned: prev?.isCloned ?? false,
+                      isMock: prev?.isMock,
+                      fallback: prev?.fallback ?? false,
+                      notice: prev?.notice ?? null,
+                      label: prev?.label ?? null,
+                      error: err.message || "Failed to generate speech audio.",
+                      streaming: false,
+                    }));
+                  })
+                  .finally(() => {
+                    if (retryId === askRequestIdRef.current) setTtsLoading(false);
+                  });
               }}
             />
           )}
 
-          {/* Latest question & answer (the newest answer replaces the previous one) */}
-          <div style={{ flex: 1, marginTop: "1rem" }}>
-            <h4 style={{ margin: "0 0 0.75rem", color: "#495057", fontSize: "0.95rem", borderBottom: "1px solid #dee2e6", paddingBottom: "0.5rem" }}>
-              💬 Latest Answer
-            </h4>
-
-            {conversation.length === 0 ? (
-              <div style={{ color: "#888", fontSize: "0.9rem", textAlign: "center", marginTop: "2rem" }}>
-                No questions asked yet. Ask a question using the microphone above to start learning!
+          {/* Latest answer card */}
+          {latestAssistant && (
+            <div className="answer-card">
+              <div className="card-head">
+                <strong>💡 AI Educational Tutor</strong>
+                <span>{latestAssistant.timestamp}</span>
               </div>
-            ) : (
-              <div style={{ display: "flex", flexDirection: "column", gap: "1.25rem" }}>
-                {conversation.map((msg) => (
-                  <div
-                    key={msg.id}
-                    style={{
-                      background: msg.role === "user" ? "#f1f3f5" : "#fff",
-                      border: `1px solid ${msg.role === "user" ? "#dee2e6" : msg.grounded ? "#28a745" : "#ffc107"}`,
-                      borderRadius: "8px",
-                      padding: "1rem",
-                    }}
-                  >
-                    {/* Header info */}
-                    <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "0.4rem", fontSize: "0.85rem", color: "#666" }}>
-                      <strong>{msg.role === "user" ? "🙋‍♂️ Student Voice Question" : "💡 AI Educational Tutor"}</strong>
-                      <span>{msg.timestamp}</span>
+
+              {/* Grounded / Not-Grounded Banner */}
+              <div className={`banner ${latestAssistant.grounded ? "banner-success" : "banner-warning"}`} style={{ marginBottom: 12 }}>
+                {latestAssistant.grounded
+                  ? `✅ Grounded in Study Material (${selectedChapter?.title}${latestAssistant.pageNumber ? ` • Page ${latestAssistant.pageNumber}` : ""})`
+                  : "⚠️ Notice: This question isn't covered in the uploaded material."}
+              </div>
+
+              {/* Cloned voice badge */}
+              {latestAssistant.isCloned && (
+                <span className="badge badge-accent" style={{ marginBottom: 8 }}>
+                  <span aria-hidden="true">🏷️</span>{" "}
+                  <span>{latestAssistant.voiceLabel || "AI-generated voice, authorized by the teacher."}</span>
+                </span>
+              )}
+
+              <p className="answer-text">{latestAssistant.answer}</p>
+
+              {/* Source chips */}
+              {latestAssistant.sources && latestAssistant.sources.length > 0 && (
+                <div className="sources-list">
+                  <div style={{ fontWeight: 600, marginBottom: 6 }}>📚 Sources Referenced:</div>
+                  <ul>
+                    {latestAssistant.sources.map((src: any, idx: number) => (
+                      <li key={idx} style={{ marginBottom: 4 }}>
+                        <strong>{src.document_name}</strong>
+                        {src.page_number ? <span className="badge badge-muted" style={{ marginLeft: 6 }}>p. {src.page_number}</span> : null}
+                        {src.excerpt ? `: "${src.excerpt}"` : ""}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              {/* Retrieval debug */}
+              {latestAssistant.debug && (
+                <details data-testid="rag-debug" style={{ marginTop: 12, borderTop: "1px dashed var(--color-border)", paddingTop: 10, fontSize: "0.78rem", color: "var(--color-text-dim)" }}>
+                  <summary style={{ cursor: "pointer", fontWeight: 600 }}>🐞 Debug (retrieval)</summary>
+                  <div style={{ marginTop: 8 }}>
+                    <div>
+                      Model: <code>{latestAssistant.debug.embedding_model}</code> • Query dim:{" "}
+                      <code>{latestAssistant.debug.query_dimension}</code> • Threshold:{" "}
+                      <code>{latestAssistant.debug.threshold}</code> • Candidates:{" "}
+                      <code>{latestAssistant.debug.candidate_count}</code> • Dim mismatch:{" "}
+                      <code>{latestAssistant.debug.dimension_mismatch_chunks}</code>
                     </div>
-
-                    {msg.role === "user" ? (
-                      <p style={{ margin: 0, fontSize: "1rem", color: "#212529" }}>{msg.question}</p>
-                    ) : (
-                      <div>
-                        {/* Grounded / Not-Grounded Banner */}
-                        <div
-                          style={{
-                            padding: "0.4rem 0.75rem",
-                            borderRadius: "4px",
-                            fontSize: "0.85rem",
-                            fontWeight: 600,
-                            marginBottom: "0.75rem",
-                            background: msg.grounded ? "#d4edda" : "#fff3cd",
-                            color: msg.grounded ? "#155724" : "#856404",
-                            border: `1px solid ${msg.grounded ? "#c3e6cb" : "#ffeeba"}`,
-                          }}
-                        >
-                          {msg.grounded
-                            ? `✅ Grounded in Study Material (${selectedChapter?.title}${msg.pageNumber ? ` • Page ${msg.pageNumber}` : ""})`
-                            : "⚠️ Notice: This question isn't covered in the uploaded material."}
-                        </div>
-
-                        {/* Cloned Voice Label */}
-                        {msg.isCloned && (
-                          <div style={{ fontSize: "0.8rem", color: "#2e7d32", fontWeight: "bold", marginBottom: "0.5rem" }}>
-                            🏷️ {msg.voiceLabel || "AI-generated voice, authorized by the teacher."}
-                          </div>
-                        )}
-
-                        <p style={{ margin: "0 0 0.75rem", fontSize: "1rem", lineHeight: 1.6, whiteSpace: "pre-wrap", color: "#212529" }}>
-                          {msg.answer}
-                        </p>
-
-                        {/* Citations & Sources */}
-                        {msg.sources && msg.sources.length > 0 && (
-                          <div style={{ marginTop: "0.75rem", borderTop: "1px solid #dee2e6", paddingTop: "0.5rem" }}>
-                            <div style={{ fontSize: "0.8rem", fontWeight: 600, color: "#6c757d", marginBottom: "0.25rem" }}>
-                              📚 Sources Referenced:
-                            </div>
-                            <ul style={{ margin: 0, paddingLeft: "1.2rem", fontSize: "0.85rem", color: "#495057" }}>
-                              {msg.sources.map((src: any, idx: number) => (
-                                <li key={idx}>
-                                  <strong>{src.document_name}</strong>
-                                  {src.page_number ? ` (Page ${src.page_number})` : ""}: <em>"{src.excerpt}"</em>
-                                </li>
-                              ))}
-                            </ul>
-                          </div>
-                        )}
-
-                        {/* Retrieval Debug (only returned when RAG_DEBUG is enabled) */}
-                        {msg.debug && (
-                          <details
-                            data-testid="rag-debug"
-                            style={{
-                              marginTop: "0.75rem",
-                              borderTop: "1px dashed #ced4da",
-                              paddingTop: "0.5rem",
-                              fontSize: "0.8rem",
-                              color: "#6c757d",
-                            }}
-                          >
-                            <summary style={{ cursor: "pointer", fontWeight: 600 }}>
-                              🐞 Debug (retrieval)
-                            </summary>
-                            <div style={{ marginTop: "0.5rem" }}>
-                              <div>
-                                Model: <code>{msg.debug.embedding_model}</code> • Query dim:{" "}
-                                <code>{msg.debug.query_dimension}</code> • Threshold:{" "}
-                                <code>{msg.debug.threshold}</code> • Candidates:{" "}
-                                <code>{msg.debug.candidate_count}</code> • Dim mismatch:{" "}
-                                <code>{msg.debug.dimension_mismatch_chunks}</code>
-                              </div>
-                              <ol style={{ margin: "0.5rem 0 0", paddingLeft: "1.2rem" }}>
-                                {(msg.debug.scored_chunks || []).map((c: any) => (
-                                  <li key={c.chunk_id}>
-                                    <code>#{c.chunk_id}</code> {c.doc}
-                                    {c.page ? ` (p${c.page})` : ""} — score{" "}
-                                    <strong>{c.score}</strong> (vec {c.vector_score}, kw{" "}
-                                    {c.keyword_score})
-                                    {c.content_preview ? `: "${c.content_preview}…"` : ""}
-                                  </li>
-                                ))}
-                              </ol>
-                            </div>
-                          </details>
-                        )}
-                      </div>
-                    )}
+                    <ol style={{ margin: "8px 0 0", paddingLeft: 20 }}>
+                      {(latestAssistant.debug.scored_chunks || []).map((c: any) => (
+                        <li key={c.chunk_id}>
+                          <code>#{c.chunk_id}</code> {c.doc}
+                          {c.page ? ` (p${c.page})` : ""} — score{" "}
+                          <strong>{c.score}</strong> (vec {c.vector_score}, kw{" "}
+                          {c.keyword_score})
+                          {c.content_preview ? `: "${c.content_preview}…"` : ""}
+                        </li>
+                      ))}
+                    </ol>
                   </div>
-                ))}
-              </div>
-            )}
-          </div>
+                </details>
+              )}
+            </div>
+          )}
+
+          {latestExchange.length === 0 && (
+            <div style={{ color: "var(--color-text-dim)", fontSize: "0.88rem", textAlign: "center", marginTop: 32 }}>
+              No questions asked yet. Ask a question using the microphone above to start learning!
+            </div>
+          )}
         </div>
       </div>
+
     </div>
   );
 };

@@ -25,7 +25,6 @@ export const PdfReader: React.FC<PdfReaderProps> = ({
   const [error, setError] = useState<string | null>(null);
   const renderTaskRef = useRef<any>(null);
 
-  // Load PDF document from binary data
   useEffect(() => {
     let active = true;
     setLoading(true);
@@ -61,13 +60,11 @@ export const PdfReader: React.FC<PdfReaderProps> = ({
     };
   }, [fileData]);
 
-  // Render current page onto canvas
   useEffect(() => {
     if (!pdfDoc || !canvasRef.current) return;
 
     let isCancelled = false;
 
-    // Cancel existing render task before starting a new one
     if (renderTaskRef.current) {
       renderTaskRef.current.cancel();
       renderTaskRef.current = null;
@@ -126,131 +123,53 @@ export const PdfReader: React.FC<PdfReaderProps> = ({
     }
   };
 
+  const pageBtn = (label: string, onClick: () => void, disabled: boolean) => (
+    <button
+      onClick={onClick}
+      disabled={disabled}
+      className="btn btn-ghost"
+      style={{ padding: "0.3rem 0.6rem", fontSize: "0.82rem" }}
+    >
+      {label}
+    </button>
+  );
+
   return (
-    <div style={{ display: "flex", flexDirection: "column", height: "100%", background: "#495057", borderRadius: "8px", overflow: "hidden" }}>
-      {/* Navigation & Controls Bar */}
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          padding: "0.6rem 1rem",
-          background: "#212529",
-          color: "#fff",
-          fontSize: "0.9rem",
-          gap: "1rem",
-          flexWrap: "wrap",
-        }}
-      >
-        <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-          <button
-            onClick={() => changePage(currentPage - 1)}
-            disabled={currentPage <= 1 || loading}
-            style={{
-              padding: "0.35rem 0.75rem",
-              background: currentPage <= 1 ? "#343a40" : "#0d6efd",
-              color: "#fff",
-              border: "none",
-              borderRadius: "4px",
-              cursor: currentPage <= 1 ? "not-allowed" : "pointer",
-              fontWeight: 500,
-            }}
-          >
-            ◀ Prev
-          </button>
-          <span>
-            Page <strong>{currentPage}</strong> of <strong>{numPages}</strong>
+    <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
+      <div className="pdf-toolbar">
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          {pageBtn("◀ Prev", () => changePage(currentPage - 1), currentPage <= 1 || loading)}
+          <span className="page-info">
+            Page <strong style={{ color: "var(--color-text)" }}>{currentPage}</strong> of <strong style={{ color: "var(--color-text)" }}>{numPages}</strong>
           </span>
-          <button
-            onClick={() => changePage(currentPage + 1)}
-            disabled={currentPage >= numPages || loading}
-            style={{
-              padding: "0.35rem 0.75rem",
-              background: currentPage >= numPages ? "#343a40" : "#0d6efd",
-              color: "#fff",
-              border: "none",
-              borderRadius: "4px",
-              cursor: currentPage >= numPages ? "not-allowed" : "pointer",
-              fontWeight: 500,
-            }}
-          >
-            Next ▶
-          </button>
+          {pageBtn("Next ▶", () => changePage(currentPage + 1), currentPage >= numPages || loading)}
         </div>
 
-        <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-          <button
-            onClick={() => setScale((s) => Math.max(0.75, s - 0.2))}
-            style={{
-              padding: "0.35rem 0.6rem",
-              background: "#495057",
-              color: "#fff",
-              border: "none",
-              borderRadius: "4px",
-              cursor: "pointer",
-            }}
-            title="Zoom Out"
-          >
-            🔍 -
-          </button>
-          <span>{Math.round(scale * 100)}%</span>
-          <button
-            onClick={() => setScale((s) => Math.min(2.5, s + 0.2))}
-            style={{
-              padding: "0.35rem 0.6rem",
-              background: "#495057",
-              color: "#fff",
-              border: "none",
-              borderRadius: "4px",
-              cursor: "pointer",
-            }}
-            title="Zoom In"
-          >
-            🔍 +
-          </button>
-          <button
-            onClick={() => setScale(1.25)}
-            style={{
-              padding: "0.35rem 0.6rem",
-              background: "#495057",
-              color: "#ced4da",
-              border: "none",
-              borderRadius: "4px",
-              cursor: "pointer",
-              fontSize: "0.8rem",
-            }}
-          >
-            Reset
-          </button>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          {pageBtn("−", () => setScale((s) => Math.max(0.75, s - 0.2)), false)}
+          <span style={{ fontSize: "0.8rem", color: "var(--color-text-muted)", minWidth: 44, textAlign: "center" }}>
+            {Math.round(scale * 100)}%
+          </span>
+          {pageBtn("+", () => setScale((s) => Math.min(2.5, s + 0.2)), false)}
+          {pageBtn("Reset", () => setScale(1.25), false)}
         </div>
       </div>
 
-      {/* Canvas Display Viewport */}
-      <div
-        style={{
-          flex: 1,
-          overflow: "auto",
-          display: "flex",
-          justifyContent: "center",
-          alignItems: "flex-start",
-          padding: "1rem",
-        }}
-      >
+      <div className="pdf-viewport">
         {loading && (
-          <div style={{ color: "#fff", marginTop: "4rem", textAlign: "center" }}>
+          <div style={{ color: "var(--color-text-muted)", marginTop: "4rem", textAlign: "center" }}>
             <p>📄 Loading PDF Document...</p>
           </div>
         )}
         {error && (
-          <div style={{ color: "#ffc107", marginTop: "4rem", textAlign: "center" }}>
-            <p>⚠️ {error}</p>
+          <div className="banner banner-warning" style={{ marginTop: "4rem" }}>
+            ⚠️ {error}
           </div>
         )}
         <canvas
           ref={canvasRef}
           style={{
             display: loading || error ? "none" : "block",
-            boxShadow: "0 4px 12px rgba(0,0,0,0.4)",
             background: "#fff",
             maxWidth: "100%",
           }}

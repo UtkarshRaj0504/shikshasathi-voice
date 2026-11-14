@@ -196,4 +196,55 @@ Verified against https://docs.gnani.ai (Voice Cloning pages) before coding. No v
 * **Decision**: keep the documented auto-detect value `indic-auto` as the default for *I Will Speak In*, and keep `language_code` a single hint. Do **not** adopt a comma-separated ordered hint list (e.g. `en-IN,hi-IN`) as the default, even though Gnani documents that "the model listens for the languages you send first".
 * **Why**: `docs.gnani.ai/api/STT/speech-to-text` states `language_code` is a **hint, not a lock** — "the transcript follows the language actually spoken" — and that Prisma v3.0 also accepts `indic-auto` (all 10 languages) or a comma-separated list of **1–4** languages. The product supports 10 languages (and the answer-language selector also offers `as-IN`), so defaulting to a 4-language list would silently make the other six undetectable. Live probes against the real endpoint with clean English speech returned `en-IN` for **all three** hints (`indic-auto`, `en-IN`, `hi-IN`), and the same probe routed through the old box downsampler still returned `en-IN` — so the reported "I speak English and it says Hindi" is **not** the Bug 2 mapping (already fixed) and not a decoder defect. It is consistent with the provider's own detection on real, accented/narrow-band mic audio; `detected_language_code` is documented as a judgment made from the **script of the transcript**. The deterministic escape hatches are: the student selecting **English** explicitly (persisted via `/me/preferences`), and re-running the *Edit & Resend Question* box with the corrected transcript. Bug 11's audio-quality fix (§7n) removes the one client-side degradation we could prove, without pretending it is a guaranteed cure for a provider-side detection call.
 
+## 8. Frontend UI Redesign (dark emerald theme)
+
+* **Scope**: UI-only redesign of the React + Vite frontend. No API calls, business logic, routes, auth flow or data flow were changed. The framework stack (React, Vite, react-router-dom) is unchanged.
+
+### 8a. Design tokens & palette
+* **Decision**: a single dark theme with near-black green background (`--color-bg: #050F0D`), translucent dark-green surfaces with 1 px mint-tinted borders, off-white text (`#E8EFE9`), muted text, and **one** accent — mint green (`#2EE6A6`). The accent is used for the second headline line, primary buttons, active/focus states, and glowing lines. Body-text contrast meets WCAG AA against the background.
+* **Why**: the spec required a single accent and accessible contrast; a near-black green field with a mint accent gives a calm, "study-friendly" dark UI without introducing competing hues.
+
+### 8b. Aurora background — CSS-only, animated, reduced-motion safe
+* **Decision**: the hero aurora is built from layered `radial-gradient` blobs plus a slow-rotating `conic-gradient` layer in pure CSS (`.aurora`, `::before`, `::after`, `.aurora-layer-3`). A faint SVG `feTurbulence` film-grain overlay sits above it. The app screens use a `.aurora-dim` variant (lower opacity, no conic rotation) so reading is comfortable. The `prefers-reduced-motion` media query halts all drift/rotation animations (static gradients only).
+* **Why**: no heavy images or video keeps the landing page cheap to render and avoids layout cost; CSS gradients are GPU-composited and respect the OS motion preference.
+
+### 8c. Shape & motion language
+* **Decision**: sharp square corners (radius 0–2 px), 1 px borders everywhere, no rounded pills, no soft shadows — only subtle glows on accent elements. Entrance fades and the hero "Question trace" panel use `framer-motion`; `useReducedMotion` disables motion animations when the user prefers reduced motion.
+* **Why**: the spec explicitly forbade rounded pills/soft shadows and required framer-motion for entrance fades and the trace panel.
+
+### 8d. Typography
+* **Decision**: Manrope (geometric grotesk) as the primary face with tight letter-spacing on large headlines (hero headline `clamp(48px, 8vw, 96px)`). Noto Sans Devanagari and Noto Sans Kannada are loaded as font-family fallbacks with comfortable line-height so Hindi and Kannada render well.
+* **Why**: the product answers in English/Hindi/Kannada, so the body font stack must include native Devanagari/Kannada fallbacks rather than falling back to the browser default.
+
+### 8e. Routing — three top-level routes, auth preserved
+* **Decision**: routes are `/` (Landing), `/login` (Login/Register), and `/app` (authenticated app). `AppPage` checks `getToken()` then `api.getMe()` to decide whether to render `StudentDashboard` or `TeacherDashboard`; unauthenticated users are redirected to `/login`. Logout calls `removeToken()` and navigates to `/`. The auth token, `api` calls, and data flow are unchanged from the original implementation.
+* **Why**: a landing page was required at `/`, but the original app logic lived at the root. Moving the app to `/app` keeps the existing auth gate and component logic intact while adding a public entry point.
+
+### 8f. Audio player — custom controls, mandatory disclosure label
+* **Decision**: `AudioPlayer` was rethemed but its base64→objectURL segment logic, streaming/part handling, and mock/fallback badges are unchanged. Custom controls (play/pause, replay, speed 1/1.25/1.5/0.75×, timeline, time display) replace the native `<audio>` controls. The cloned-voice disclosure label `"AI-generated voice, authorized by the teacher."` is rendered in its own `<span>`; any decorative emoji (🎙️/🏷️) is placed in a sibling `<span aria-hidden="true">` so the exact label text stays matchable by `getByText`/`getAllByText`.
+* **Why**: the spec required a custom player and an always-visible "AI-generated voice, authorized by the teacher" badge. Separating the decorative icon from the label text keeps the exact disclosure string findable by tests and screen readers.
+
+### 8g. Test selector preservation strategy
+* **Decision**: all existing `data-testid` attributes and button text/`aria-label` strings required by `StudentExperience.test.tsx` and `TeacherVoice.test.tsx` were preserved exactly. Where a redesign introduced a decorative prefix, the test-asserted text was kept in a dedicated element (see 8f). No test was modified.
+* **Why**: the task constraint was "keep all frontend tests passing (update selectors only if needed)". Preserving test IDs and exact text avoids touching tests and keeps the contract stable.
+
+### 8h. Honest content policy — no fake stats, testimonials, or logos
+* **Decision**: the landing page contains no fake performance numbers, fake statistics, fake testimonials, or fake customer logos. The hero "Question trace" panel is labelled as an illustrative example and shows only the five pipeline steps; no synthetic latency value is shown. The feature copy describes repeated, independent questions and makes clear that each new question replaces the previous answer.
+* **Why**: the spec explicitly prohibited fabricated metrics, and the app intentionally does not preserve or send conversation history.
+
+### 8i. Lazy-loaded PDF reader
+* **Decision**: `PdfReader` is dynamically imported by `StudentDashboard` and rendered inside a `Suspense` fallback. Its pdfjs worker remains split into its own production asset.
+* **Why**: PDF rendering code is not needed until a student opens a PDF, so code splitting keeps it out of the initial application route without changing document-loading or API behavior.
+
+### 8j. Latest-answer-only student experience
+* **Decision**: the student UI retains only the current question/answer pair for answer rendering and speech retry. A new question replaces that pair; no history drawer or prior exchanges are retained or sent to the API.
+* **Why**: this preserves the existing stateless `/ask` contract and avoids implying contextual conversation memory the app does not provide.
+
+### 8k. Teacher document upload interaction
+* **Decision**: the existing document-upload API call is unchanged. The upload surface now accepts file drops as well as file-picker selection and shows indeterminate progress while the request and document processing are pending.
+* **Why**: the existing `fetch` wrapper does not expose byte-level upload progress; an indeterminate indicator communicates activity without showing fabricated percentages.
+
+### 8l. Shared app controls and motion accessibility
+* **Decision**: student and teacher headers use one keyboard-operable native disclosure menu for account details and sign-out. The app wraps motion components in `MotionConfig reducedMotion="user"` and uses static CSS meter bars when reduced motion is preferred.
+* **Why**: shared interaction behavior is easier to discover and maintain, and motion respects the operating-system accessibility preference.
 
