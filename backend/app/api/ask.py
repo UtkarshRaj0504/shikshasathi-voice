@@ -32,6 +32,7 @@ from app.services.llm_service import (
     GeminiRateLimitError,
     GeminiTimeoutError,
 )
+from app.services.text_format import normalize_answer_markdown
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -401,7 +402,11 @@ def ask_question(
         f"If the source material is in English and the student requests or speaks another language, "
         f"translate and explain the concepts accurately in {target_lang}.\n"
         f"4. Pedagogical Level: {level_instruction}\n"
-        "5. Tone: Encouraging, supportive, clear, and educational."
+        "5. Tone: Encouraging, supportive, clear, and educational.\n"
+        "6. Formatting: Write in short paragraphs. Use \"- \" bullet lists or \"1.\" numbered "
+        "steps only when they make the answer clearer. Use **bold** sparingly, only for key "
+        "terms. Do not use headings (#), tables, code fences, or emojis. Keep it easy to read "
+        "for a student."
     )
 
     history_str = ""
@@ -495,4 +500,9 @@ def ask_question(
     if llm_marker:
         return AskResponse(answer=REFUSAL_MESSAGE, sources=[], grounded=False, debug=debug_info)
 
-    return AskResponse(answer=answer, sources=sources, grounded=True, debug=debug_info)
+    return AskResponse(
+        answer=normalize_answer_markdown(answer),
+        sources=sources,
+        grounded=True,
+        debug=debug_info,
+    )

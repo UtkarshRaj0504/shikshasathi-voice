@@ -1,5 +1,6 @@
 import React, { lazy, Suspense, useEffect, useState, useRef } from "react";
 import { api, removeToken } from "../services/api";
+import { AnswerText } from "./AnswerText";
 import { AudioPlayer } from "./AudioPlayer";
 import { Aurora, LogoMark } from "./Aurora";
 import { UserMenu } from "./UserMenu";
@@ -1129,7 +1130,7 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ onLogout }) 
                 </span>
               )}
 
-              <p className="answer-text">{latestAssistant.answer}</p>
+              <AnswerText text={latestAssistant.answer} />
 
               {/* Source chips */}
               {latestAssistant.sources && latestAssistant.sources.length > 0 && (

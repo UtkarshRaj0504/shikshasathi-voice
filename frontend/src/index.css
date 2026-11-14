@@ -1308,9 +1308,66 @@ img {
 }
 .answer-text {
   font-size: 0.95rem;
-  line-height: 1.65;
-  white-space: pre-wrap;
+  line-height: 1.7;
   color: var(--color-text);
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+.answer-text > *:first-child {
+  margin-top: 0;
+}
+.answer-text > *:last-child {
+  margin-bottom: 0;
+}
+.answer-text p {
+  margin: 0 0 var(--space-3);
+}
+.answer-text strong {
+  font-weight: 650;
+  color: var(--color-text-strong, var(--color-text));
+}
+.answer-text ul,
+.answer-text ol {
+  margin: 0 0 var(--space-3);
+  padding-left: 1.4em;
+}
+.answer-text ul {
+  list-style: disc;
+}
+.answer-text ol {
+  list-style: decimal;
+}
+.answer-text ul ul {
+  list-style: circle;
+}
+.answer-text li {
+  margin: 0 0 var(--space-1);
+}
+.answer-text li > p {
+  margin: 0;
+}
+.answer-text a {
+  color: var(--color-accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.answer-text code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.88em;
+  background: var(--color-surface-2, rgba(255, 255, 255, 0.08));
+  padding: 0.1em 0.35em;
+  border-radius: 4px;
+}
+.answer-text blockquote {
+  margin: 0 0 var(--space-3);
+  padding-left: var(--space-3);
+  border-left: 3px solid var(--color-border-strong);
+  color: var(--color-text-muted);
+}
+.answer-text hr {
+  border: none;
+  border-top: 1px solid var(--color-border);
+  margin: var(--space-3) 0;
 }
 .sources-list {
   margin-top: var(--space-3);

@@ -13,6 +13,7 @@ from app.core.database import get_db
 from app.core.security import get_current_user
 from app.models.user import User
 from app.models.voice_profile import VoiceProfile
+from app.services.text_format import strip_markdown_for_speech
 from app.services.tts_service import TTSError, detect_audio_content_type, get_tts_service
 
 logger = logging.getLogger(__name__)
@@ -53,6 +54,9 @@ def speak_text(
     """
     tts_service = get_tts_service()
 
+    # Speak plain prose: emphasis/bullet/link markdown would be read aloud verbatim.
+    speech_text = strip_markdown_for_speech(body.text).strip() or body.text
+
     target_profile: VoiceProfile | None = None
     use_cloned = False
     fallback = False
@@ -79,7 +83,7 @@ def speak_text(
     if use_cloned and target_profile:
         try:
             audio_bytes = tts_service.synthesize_speech(
-                text=body.text,
+                text=speech_text,
                 voice_id=target_profile.gnani_voice_id or str(target_profile.id),
                 language=body.language,
                 is_cloned=True,
@@ -97,7 +101,7 @@ def speak_text(
         # Default voice: never replace a real-provider failure with a mock beep.
         try:
             audio_bytes = tts_service.synthesize_speech(
-                text=body.text,
+                text=speech_text,
                 language=body.language,
                 is_cloned=False,
             )
