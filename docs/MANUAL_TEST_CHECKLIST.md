@@ -6,7 +6,7 @@ obvious. `.env.example` lists every variable; do **not** commit a real `.env`.
 Quick automated checks:
 
 ```
-python -m pytest tests/backend -q      # expect: 125 passed
+python -m pytest tests/backend -q      # expect: 126 passed
 cd frontend ; npm run build            # expect: exit 0
 cd frontend ; npx vitest run           # expect: 13 passed
 ```
@@ -104,11 +104,14 @@ the real provider.
 2. Read the consent statement. The **Create** button must stay disabled until you tick the
    consent box, enter a name and provide a sample. Without the tick the submit must be blocked
    (and a direct API call without `consent_confirmed=true` returns HTTP 400).
-3. Record: click record, read the suggested script for ~20–30 s. A timer and level meter move;
-   recording auto-stops at 30 s. Play it back before submitting.
+3. Record: click record, read the suggested script for ~20 s. A timer and level meter move;
+   recording auto-stops at 25 s (the provider's hard limit is 30 s). Play it back before
+   submitting. Stopping at under 5 s must keep **Create** disabled with a "record at least
+   5 seconds" note.
 4. Try each failure and confirm the specific message:
-   - too short (< 5 s) → "too short" message;
-   - too long (> 30 s) → "too long" message;
+   - too short (< 5 s) → *Create* stays disabled; a direct API call answers HTTP 400
+     `INVALID_AUDIO` and the server logs the reason;
+   - too long (> 30 s, upload) → "too long" message;
    - a `.txt`/`.pdf` file → "unsupported file" message;
    - huge file → "file too large" message.
 5. Submit a good sample → the profile appears in the list with status **active** (a mock run
@@ -116,7 +119,12 @@ the real provider.
    "AI-generated voice, authorized by the teacher.".
 6. Create profiles until you hit the cap (3) → further creates are rejected with a clear message.
    Rapid repeats → a rate-limit message.
-7. **Revoke** a profile (with confirmation) → status becomes **revoked** and it disappears from
+7. **Failed attempts must not use up the cap.** Force a provider failure (e.g. no
+   `GNANI_API_KEY` while `VOICE_CLONE_PROVIDER=gnani`), submit 3+ samples → each shows the
+   provider error, a **failed** row appears in the list (the list now reloads after a failure),
+   and a later working attempt still succeeds — it is *not* refused with
+   `PROFILE_LIMIT_REACHED`. Deleting the failed rows is optional.
+8. **Revoke** a profile (with confirmation) → status becomes **revoked** and it disappears from
    students' voice lists. **Delete** a profile → it is removed from your list; in the DB the
    `voice_consents` audit rows for it survive with `revoked_at` set and the FK detached.
 
@@ -161,6 +169,6 @@ the real provider.
 | `StudentExperience.test.tsx` (question-language selector) | 2 | Selector default + persistence |
 | `test_tts.py` (success/missing key/401/402/403/429/timeout/corrupt/endpoint default) | 3 | TTS error + endpoint behaviour |
 | `test_student_experience.py::test_tts_speak_fallback_when_voice_fails` | 3 | Cloned→default fallback with notice |
-| `test_voice_profiles.py` (30 tests: consent, roles, isolation, validation, cap, rate limit, provider errors, revoke/delete) | Feature | Teacher voice cloning end to end (mocked) |
+| `test_voice_profiles.py` (31 tests: consent, roles, isolation, validation, cap, rate limit, provider errors, revoke/delete) | Feature | Teacher voice cloning end to end (mocked) |
 | `TeacherVoice.test.tsx` (consent gate, status badges, preview label, delete) | Feature | Teacher "My Voice" page |
 | `StudentExperience.test.tsx` (teacher voice sample with disclosure label) | Feature | Student voice list + label |

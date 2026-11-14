@@ -11,13 +11,35 @@ network calls) and committed.
 | Bug 4 — Non-English questions always refused | Done | `f2fa86d` |
 | Bug 5 — Non-English output audio failed (TTS HTTP 500) | Done | `c4695a3` |
 | Bug 6 — Latest-answer-only study UI (no conversation log) | Done | `e1bbe3d` |
-| Feature — Teacher voice cloning (Gnani Vachana) | Done | (this commit) |
+| Bug 7 — Voice-clone preview played a beep (mock used by default) | Done | `ed05314` |
+| Bug 8 — `POST /voice-profiles` failed with an opaque HTTP 400 ("not cloning") | Done | (this commit) |
+| Feature — Teacher voice cloning (Gnani Vachana) | Done | `e43f81c` |
 
 ## Test results (last run)
 
-- Backend: `python -m pytest tests/backend -q` → **125 passed**.
+- Backend: `python -m pytest tests/backend -q` → **126 passed**.
 - Frontend: `npm run build` → exit 0 (only the pre-existing pdfjs `eval` and chunk-size warnings).
 - Frontend unit tests: `npx vitest run` → **13 passed** (2 files).
+
+## BUG 8 — creating a voice profile returned HTTP 400
+
+**Symptom**: `POST /voice-profiles` → `400 Bad Request`; the pasted server log ended at the
+profile-cap `count(*)` query, then `ROLLBACK` — i.e. **no provider call and no row written**,
+so the request died inside a pre-provider guard.
+
+**Root cause**: the cap counted every non-`revoked` profile, including the `failed` row that
+each rejected attempt writes. A few retries therefore silently used up all
+`VOICE_CLONE_MAX_PROFILES` slots while the teacher still had no usable voice, and the next
+attempt was refused with a bare `PROFILE_LIMIT_REACHED` — with nothing logged to explain it.
+The UI also never reloaded the list after a failed create, so it never showed those rows.
+
+**Fix**: the cap now counts only **usable** profiles (`active`/`pending`) in both the API and
+the page; the page reloads the list after a failed attempt; the two pre-provider `400`s are
+logged with their reason; the recorder auto-stops at 25 s (margin under the provider's 30 s
+hard limit) and *Create* is disabled for a recording shorter than 5 s. See
+`docs/DECISIONS.md` §7i-7j. The original provider error (e.g. `VOICE_CLONE_FORBIDDEN` when
+Gnani has not enabled cloning for the account) now surfaces on every retry instead of being
+masked by a limit error — see `docs/BLOCKERS.md`.
 
 ## BUG 1 — RAG grounding false negatives
 
@@ -120,7 +142,8 @@ that teacher's cloned voice in the study page.
   an active, non-revoked, consent-confirmed profile.
 - Rate limits: profile creation and preview are limited per teacher
   (`VOICE_CLONE_CREATE_RATE_LIMIT` / `VOICE_CLONE_PREVIEW_RATE_LIMIT` within
-  `VOICE_CLONE_RATE_WINDOW_SECONDS`) and profiles are capped at `VOICE_CLONE_MAX_PROFILES` (3).
+  `VOICE_CLONE_RATE_WINDOW_SECONDS`) and each teacher is capped at `VOICE_CLONE_MAX_PROFILES` (3)
+  **usable** profiles — `failed`/`revoked` rows never consume a slot.
 - `/voices` lists only active profiles with confirmed, non-revoked consent; `/tts/speak` uses the
   cloned voice when `voice_profile_id` is set, returns label
   `"AI-generated voice, authorized by the teacher."` and, if the clone fails, plays the default
@@ -129,10 +152,12 @@ that teacher's cloned voice in the study page.
 **Frontend**
 
 - Teacher dashboard → "🎙️ My Voice": consent statement + a tick box that cannot be skipped,
-  record with `MediaRecorder` (timer, level meter, auto-stop at 30 s, re-encoded to 16 kHz WAV),
-  or upload WAV/MP3; playback before submitting; suggested 20–30 s reading script + clean-recording
+  record with `MediaRecorder` (timer, level meter, auto-stop at 25 s, re-encoded to 16 kHz WAV),
+  or upload WAV/MP3; playback before submitting; suggested reading script + clean-recording
   tips; profile list with status badges, Preview / Revoke / Delete (with confirmation) and clear
-  per-failure error messages.
+  per-failure error messages. *Create* stays disabled until the consent box is ticked, a sample
+  of at least 5 s is ready, a name is typed and a profile slot is free; the list is reloaded
+  after every attempt so a `failed` row is never hidden.
 - Student study page: the "Choose teacher voice" step and the header voice pill list each
   teacher's active cloned voice by name plus a "🔊 Sample" preview button (and Default voice);
   cloned playback always shows the disclosure label; a fallback notice appears when the default

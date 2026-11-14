@@ -348,6 +348,35 @@ def test_profile_cap_enforced(client):
     assert res.json()["detail"]["code"] == "PROFILE_LIMIT_REACHED"
 
 
+def test_failed_profiles_do_not_count_toward_cap(client, monkeypatch):
+    """A rejected attempt leaves a 'failed' row, but must never consume a slot.
+
+    Otherwise a few failed retries block the feature with an opaque HTTP 400 even
+    though the teacher has no usable voice at all.
+    """
+    from app.api import voice_profiles as vp
+    from app.services.voice_clone_service import MockVoiceCloneService
+
+    class _FailingService:
+        is_mock = False
+
+        def create_voice(self, audio_bytes, filename="sample.wav"):
+            raise VoiceCloneError("nope", status_code=502, error_code="VOICE_CLONE_FORBIDDEN")
+
+    monkeypatch.setattr(vp, "get_voice_clone_service", lambda: _FailingService())
+    token = register_and_login(client, "t_capfail@example.com", "teacher")
+    for i in range(3):
+        res = _create_profile(client, token, name=f"Failed {i}")
+        assert res.status_code == 502
+        assert res.json()["detail"]["code"] == "VOICE_CLONE_FORBIDDEN"
+
+    # The teacher has 3 "failed" profiles but 0 usable ones -> creation must still work.
+    monkeypatch.setattr(vp, "get_voice_clone_service", lambda: MockVoiceCloneService())
+    ok = _create_profile(client, token, name="Real Voice")
+    assert ok.status_code == 200, ok.text
+    assert ok.json()["status"] == "active"
+
+
 def test_create_rate_limited(client, monkeypatch):
     from app.api import voice_profiles as vp
     from app.core.config import settings

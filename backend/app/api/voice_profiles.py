@@ -36,6 +36,12 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/voice-profiles", tags=["voice-profiles"])
 
+# Only these statuses describe a usable cloned voice. A "failed" attempt (the
+# provider rejected the sample) and a "revoked" profile must never consume one of
+# the teacher's profile slots — otherwise a few failed retries silently block the
+# feature with an opaque HTTP 400.
+USABLE_PROFILE_STATUSES = ("active", "pending")
+
 CONSENT_TEXT_VERSION = "2.0"
 CONSENT_TEXT = """
 Voice cloning consent — please read carefully before ticking the box.
@@ -240,12 +246,21 @@ def create_voice_profile(
         )
 
     max_profiles = int(getattr(settings, "VOICE_CLONE_MAX_PROFILES", 3))
-    existing_count = (
+    usable_count = (
         db.query(VoiceProfile)
-        .filter(VoiceProfile.teacher_id == teacher.id, VoiceProfile.status != "revoked")
+        .filter(
+            VoiceProfile.teacher_id == teacher.id,
+            VoiceProfile.status.in_(USABLE_PROFILE_STATUSES),
+        )
         .count()
     )
-    if existing_count >= max_profiles:
+    if usable_count >= max_profiles:
+        logger.warning(
+            "Voice profile cap reached for teacher %s (%s usable of %s)",
+            teacher.id,
+            usable_count,
+            max_profiles,
+        )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={
@@ -258,6 +273,7 @@ def create_voice_profile(
     try:
         validate_reference_audio(audio_bytes, file.filename, file.content_type)
     except AudioValidationError as e:
+        logger.warning("Reference audio rejected for teacher %s: %s", teacher.id, e.message)
         raise HTTPException(
             status_code=e.status_code,
             detail={"code": "INVALID_AUDIO", "message": e.message},

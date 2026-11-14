@@ -4,14 +4,20 @@ import { AudioPlayer } from "./AudioPlayer";
 import { blobToWav } from "../utils/audio";
 
 const READING_SCRIPT =
-  "Please read this aloud in a calm, natural voice for about 20 to 30 seconds: " +
+  "Please read this aloud in a calm, natural voice for about 20 seconds: " +
   "\u201CToday we are going to learn something new together. Take your time, read " +
   "carefully, and think about each idea step by step. If something is not clear, " +
   "we will go over it again slowly, with a simple example, until it makes sense. " +
   "Learning becomes easy when we practise a little every single day.\u201D";
 
 const MIN_SECONDS = 5;
-const MAX_SECONDS = 30;
+// The provider accepts at most 30 s; we stop at 25 s so that the encoded sample can
+// never creep past the hard limit and be rejected. See docs/DECISIONS.md.
+const MAX_SECONDS = 25;
+
+// Only these statuses are a usable cloned voice; failed/revoked profiles must not
+// count against the profile limit (the backend uses the same rule).
+const USABLE_STATUSES = ["active", "pending"];
 
 interface VoiceProfile {
   id: number;
@@ -208,8 +214,19 @@ export const TeacherVoicePage: React.FC = () => {
     e.target.value = "";
   };
 
+  const usableCount = profiles.filter((p) => USABLE_STATUSES.includes(p.status)).length;
+  const limitReached = usableCount >= maxProfiles;
+  // A recorded sample must be long enough; an out-of-range sample can never be
+  // cloned, so submitting it only ever produced an opaque HTTP 400.
+  const sampleTooShort = mode === "record" && seconds > 0 && seconds < MIN_SECONDS;
+
   const canSubmit =
-    consentChecked && !submitting && !!sampleBlob && !!voiceName.trim() && profiles.filter((p) => p.status !== "revoked").length < maxProfiles;
+    consentChecked &&
+    !submitting &&
+    !!sampleBlob &&
+    !!voiceName.trim() &&
+    !sampleTooShort &&
+    !limitReached;
 
   const handleCreate = async () => {
     if (!canSubmit || !sampleBlob) return;
@@ -230,6 +247,9 @@ export const TeacherVoicePage: React.FC = () => {
       await loadProfiles();
     } catch (err: any) {
       setError(err.message || "Could not create the voice profile.");
+      // A failed attempt is recorded as a "failed" profile; reload so the list (and
+      // the profile limit) reflect reality instead of going stale.
+      await loadProfiles();
     } finally {
       setSubmitting(false);
     }
@@ -274,9 +294,6 @@ export const TeacherVoicePage: React.FC = () => {
       setError(err.message || "Could not delete the voice profile.");
     }
   };
-
-  const nonRevokedCount = profiles.filter((p) => p.status !== "revoked").length;
-  const limitReached = nonRevokedCount >= maxProfiles;
 
   return (
     <div style={{ fontFamily: "system-ui, sans-serif", maxWidth: "900px" }}>

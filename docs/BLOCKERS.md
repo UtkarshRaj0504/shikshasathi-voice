@@ -30,8 +30,18 @@ What to ask Gnani support to confirm/enable:
 4. Is there a documented endpoint to **delete** a cloned voice/embedding? (None is documented, so
    our delete is currently a best-effort no-op.)
 
-Until it is enabled, run with `VOICE_CLONE_PROVIDER=mock` (the default) — cloning works end to
-end and the audio is a labelled synthetic tone.
+Until it is enabled, run with `VOICE_CLONE_PROVIDER=mock` (auto-detected only when
+`GNANI_API_KEY` is empty — see DECISIONS.md 7h) so cloning works end to end with a labelled
+synthetic tone.
+
+**Note (Bug 8)**: while the account is rejecting cloning, every attempt stores a `failed`
+profile. Those rows used to count toward `VOICE_CLONE_MAX_PROFILES`, so after a few retries the
+teacher was refused with a bare `HTTP 400 PROFILE_LIMIT_REACHED` — which *looked* like "cloning
+is broken" while hiding the real `VOICE_CLONE_FORBIDDEN`/`VOICE_CLONE_AUTH` cause. Failed rows
+no longer consume a slot, so the provider's actual error is now what the teacher sees on every
+retry. If `POST /voice-profiles` fails, read the error code in the response/UI first — a
+`PROFILE_LIMIT_REACHED` means the cap (delete a profile), while `VOICE_CLONE_*` points at the
+provider/account.
 
 ### Previously Resolved
 - ✅ TTS mock vs real provider selection (fixed in DECISIONS.md decision 4a)
