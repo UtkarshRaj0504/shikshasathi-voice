@@ -35,8 +35,15 @@ def get_engine():
                 cursor.close()
         else:
             url = settings.SQLALCHEMY_DATABASE_URL
-            connect_args = {"check_same_thread": False} if url.startswith("sqlite") else {}
-            _engine = create_engine(url, echo=settings.APP_DEBUG, connect_args=connect_args)
+            is_sqlite = url.startswith("sqlite")
+            connect_args = {"check_same_thread": False} if is_sqlite else {}
+            # Neon closes idle Postgres connections, so pre-ping replaces a dead
+            # pooled connection instead of raising OperationalError, and recycle
+            # retires connections before the server-side idle timeout.
+            pool_args = {} if is_sqlite else {"pool_pre_ping": True, "pool_recycle": 300}
+            _engine = create_engine(
+                url, echo=settings.APP_DEBUG, connect_args=connect_args, **pool_args
+            )
 
             if str(_engine.url).startswith("sqlite"):
                 @event.listens_for(_engine, "connect")
