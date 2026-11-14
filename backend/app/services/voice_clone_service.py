@@ -19,6 +19,16 @@ Step 2 — synthesize with the cloned voice (REST, non-streaming — preferred):
            "audio_config": {...}}
     -> raw audio bytes (audio/wav | audio/mpeg | audio/ogg)
 
+Errors (https://docs.gnani.ai/api/introduction/errors):
+  Voice Cloning (inference, SSE and embeddings) returns a FLAT body, not the
+  STT "error.type" envelope: {"success": false, "message": "...", "status_code": N}.
+  Auth / rate-limit / scope failures instead use the gateway envelope
+  {"detail": {"error_code": ..., "message": ...}}; embeddings validation failures can
+  return 422 with {"detail": [...]}.
+  HTTP 500 on the embeddings endpoint means "unexpected failure" — which per the docs
+  includes reference audio it cannot process — and 429/500/503/504 are retryable with
+  exponential backoff, so we retry those before giving up.
+
 There is no documented endpoint to delete a stored voice, so delete_voice() is a
 best-effort no-op (see docs/DECISIONS.md).
 """
@@ -28,15 +38,22 @@ import json
 import logging
 import os
 import sys
+import time
 import uuid
 
 import httpx
 
 from app.core.config import settings
+from app.services.tts_service import _sanitize_error_text
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_VOICE_CLONE_ENDPOINT = "https://api.vachana.ai/api/v1/tts/voice-clone/embeddings"
+
+# Documented as retryable (https://docs.gnani.ai/api/introduction/errors "Retrying").
+RETRYABLE_STATUSES = (429, 500, 503, 504)
+MAX_ATTEMPTS = 3
+BACKOFF_SECONDS = (0.5, 1.0)
 
 
 class VoiceCloneError(Exception):
@@ -139,17 +156,34 @@ class GnaniVoiceCloneService(VoiceCloneService):
     def _headers(self) -> dict:
         return {"X-API-Key-ID": self.api_key}
 
+    def _body_message(self, res: httpx.Response) -> str:
+        """Human-readable message from a Voice Cloning error body.
+
+        Covers the flat body ({"success": false, "message": ..., "status_code": N}) that
+        inference/embeddings return, the gateway envelope ({"detail": {...}}) used by
+        auth/rate-limit failures, and the 422 {"detail": [...]} validation shape.
+        """
+        fallback = _sanitize_error_text(getattr(res, "text", "") or "", self.api_key)
+        try:
+            body = res.json()
+        except Exception:
+            return fallback
+        if not isinstance(body, dict):
+            return fallback
+        message = body.get("message")
+        if not (isinstance(message, str) and message.strip()):
+            detail = body.get("detail")
+            if isinstance(detail, dict):
+                message = detail.get("message") or detail.get("error_code")
+            elif isinstance(detail, list) and detail and isinstance(detail[0], dict):
+                message = detail[0].get("msg")
+        if isinstance(message, str) and message.strip():
+            return _sanitize_error_text(message, self.api_key)
+        return fallback
+
     def _gateway_error(self, res: httpx.Response) -> VoiceCloneError | None:
         """Map an auth/rate/credit failure (gateway `detail` envelope) to a clear error."""
-        code = ""
-        message = ""
-        try:
-            detail = res.json().get("detail")
-            if isinstance(detail, dict):
-                code = str(detail.get("error_code") or "")
-                message = str(detail.get("message") or "")
-        except Exception:
-            pass
+        message = self._body_message(res)
         if res.status_code == 401:
             return VoiceCloneError(
                 "Voice cloning is not authorized (HTTP 401). Check the Gnani API key.",
@@ -175,8 +209,38 @@ class GnaniVoiceCloneService(VoiceCloneService):
                 status_code=429,
                 error_code="VOICE_CLONE_RATE_LIMIT",
             )
-        _ = code
         return None
+
+    def _post_embeddings(self, files: dict) -> httpx.Response:
+        """POST the reference audio, retrying the statuses the docs mark retryable.
+
+        The failures are retried with exponential backoff (0.5 s, 1 s) before the error
+        is raised, so a transient "unexpected failure" on the embeddings endpoint does
+        not have to fail the teacher's upload.
+        """
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                with httpx.Client(timeout=60.0) as client:
+                    res = client.post(self.endpoint, headers=self._headers(), files=files)
+            except httpx.TimeoutException:
+                raise VoiceCloneError("Voice cloning timed out. Please try again.", status_code=504, error_code="VOICE_CLONE_TIMEOUT")
+            except httpx.RequestError:
+                raise VoiceCloneError("Network error connecting to the voice cloning service.", status_code=502, error_code="VOICE_CLONE_NETWORK")
+
+            if res.status_code not in RETRYABLE_STATUSES or attempt >= MAX_ATTEMPTS:
+                return res
+
+            delay = BACKOFF_SECONDS[min(attempt, len(BACKOFF_SECONDS)) - 1]
+            logger.warning(
+                "Gnani voice clone embeddings returned HTTP %s; retrying in %.1fs (attempt %s/%s)",
+                res.status_code,
+                delay,
+                attempt,
+                MAX_ATTEMPTS,
+            )
+            time.sleep(delay)
 
     def create_voice(self, audio_bytes: bytes, filename: str = "sample.wav") -> str:
         if not (self.api_key or "").strip():
@@ -195,28 +259,21 @@ class GnaniVoiceCloneService(VoiceCloneService):
         mime_type = "audio/wav" if (filename or "").lower().endswith(".wav") else "audio/mpeg"
         files = {"audio_file": (filename or "sample.wav", audio_bytes, mime_type)}
 
-        try:
-            with httpx.Client(timeout=60.0) as client:
-                res = client.post(self.endpoint, headers=self._headers(), files=files)
-        except httpx.TimeoutException:
-            raise VoiceCloneError("Voice cloning timed out. Please try again.", status_code=504, error_code="VOICE_CLONE_TIMEOUT")
-        except httpx.RequestError:
-            raise VoiceCloneError("Network error connecting to the voice cloning service.", status_code=502, error_code="VOICE_CLONE_NETWORK")
+        res = self._post_embeddings(files)
 
         gw = self._gateway_error(res)
         if gw:
             raise gw
         if res.status_code in (400, 422):
-            snippet = (res.text or "")[:200]
             raise VoiceCloneError(
                 f"The reference audio was rejected ({res.status_code}). Please record 5-30 seconds "
-                f"of clear speech in a quiet room. {snippet}".strip(),
+                f"of clear speech in a quiet room. {self._body_message(res)}".strip(),
                 status_code=400,
                 error_code="VOICE_CLONE_BAD_AUDIO",
             )
         if res.status_code >= 400:
             raise VoiceCloneError(
-                f"Voice cloning failed (HTTP {res.status_code}).",
+                f"Voice cloning failed (HTTP {res.status_code}). {self._body_message(res)}".strip(),
                 status_code=502,
                 error_code="VOICE_CLONE_PROVIDER_ERROR",
             )

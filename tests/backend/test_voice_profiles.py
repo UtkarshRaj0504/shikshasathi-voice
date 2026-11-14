@@ -416,8 +416,9 @@ def _fake_response(status_code, json_body=None, text=""):
         (500, "VOICE_CLONE_PROVIDER_ERROR", 502),
     ],
 )
+@patch("app.services.voice_clone_service.time.sleep")
 @patch("app.services.voice_clone_service.httpx.Client")
-def test_gnani_create_voice_error_mapping(mock_client, http_status, expected_code, expected_status):
+def test_gnani_create_voice_error_mapping(mock_client, mock_sleep, http_status, expected_code, expected_status):
     mock_client.return_value.__enter__.return_value.post.return_value = _fake_response(
         http_status, {"detail": {"error_code": "X", "message": "boom"}}, text="boom"
     )
@@ -426,6 +427,56 @@ def test_gnani_create_voice_error_mapping(mock_client, http_status, expected_cod
         svc.create_voice(b"x" * 2000, "sample.wav")
     assert exc.value.error_code == expected_code
     assert exc.value.status_code == expected_status
+
+
+@patch("app.services.voice_clone_service.time.sleep")
+@patch("app.services.voice_clone_service.httpx.Client")
+def test_gnani_create_voice_retries_transient_500(mock_client, mock_sleep):
+    """HTTP 500 on the embeddings endpoint is documented as retryable with backoff."""
+    post = mock_client.return_value.__enter__.return_value.post
+    post.side_effect = [
+        _fake_response(
+            500,
+            {"success": False, "message": "We are facing technical difficulties.", "status_code": 500},
+            text="raw",
+        ),
+        _fake_response(
+            200,
+            {
+                "success": True,
+                "data": {
+                    "voice_clone_embedding": {
+                        "embedding": "abc123",
+                        "shape": [1, 768],
+                        "dtype": "torch.bfloat16",
+                    }
+                },
+            },
+        ),
+    ]
+    svc = GnaniVoiceCloneService(api_key="dummy-key")
+    ref = svc.create_voice(b"x" * 2000, "sample.wav")
+    assert "abc123" in ref
+    assert post.call_count == 2
+    mock_sleep.assert_called_once_with(0.5)
+
+
+@patch("app.services.voice_clone_service.time.sleep")
+@patch("app.services.voice_clone_service.httpx.Client")
+def test_persistent_500_surfaces_provider_message(mock_client, mock_sleep):
+    """A 500 that keeps failing must report Gnani's own flat-body message, not a bare code."""
+    mock_client.return_value.__enter__.return_value.post.return_value = _fake_response(
+        500,
+        {"success": False, "message": "We are facing technical difficulties.", "status_code": 500},
+        text="raw",
+    )
+    svc = GnaniVoiceCloneService(api_key="dummy-key")
+    with pytest.raises(VoiceCloneError) as exc:
+        svc.create_voice(b"x" * 2000, "sample.wav")
+    assert exc.value.error_code == "VOICE_CLONE_PROVIDER_ERROR"
+    assert exc.value.status_code == 502
+    assert "technical difficulties" in exc.value.message
+    assert mock_client.return_value.__enter__.return_value.post.call_count == 3
 
 
 @patch("app.services.voice_clone_service.httpx.Client")

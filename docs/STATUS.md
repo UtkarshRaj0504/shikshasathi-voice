@@ -12,12 +12,13 @@ network calls) and committed.
 | Bug 5 — Non-English output audio failed (TTS HTTP 500) | Done | `c4695a3` |
 | Bug 6 — Latest-answer-only study UI (no conversation log) | Done | `e1bbe3d` |
 | Bug 7 — Voice-clone preview played a beep (mock used by default) | Done | `ed05314` |
-| Bug 8 — `POST /voice-profiles` failed with an opaque HTTP 400 ("not cloning") | Done | (this commit) |
+| Bug 8 — `POST /voice-profiles` failed with an opaque HTTP 400 ("not cloning") | Done | `f3e7c3f` |
+| Bug 9 — `VOICE_CLONE_PROVIDER_ERROR` (Gnani embeddings HTTP 500 not retried) | Done | (this commit) |
 | Feature — Teacher voice cloning (Gnani Vachana) | Done | `e43f81c` |
 
 ## Test results (last run)
 
-- Backend: `python -m pytest tests/backend -q` → **126 passed**.
+- Backend: `python -m pytest tests/backend -q` → **128 passed**.
 - Frontend: `npm run build` → exit 0 (only the pre-existing pdfjs `eval` and chunk-size warnings).
 - Frontend unit tests: `npx vitest run` → **13 passed** (2 files).
 
@@ -40,6 +41,29 @@ hard limit) and *Create* is disabled for a recording shorter than 5 s. See
 `docs/DECISIONS.md` §7i-7j. The original provider error (e.g. `VOICE_CLONE_FORBIDDEN` when
 Gnani has not enabled cloning for the account) now surfaces on every retry instead of being
 masked by a limit error — see `docs/BLOCKERS.md`.
+
+## BUG 9 — `VOICE_CLONE_PROVIDER_ERROR: Voice cloning failed (HTTP 500)`
+
+**Symptom**: with the Bug 8 cap mask gone, the real provider error surfaced:
+`VOICE_CLONE_PROVIDER_ERROR: Voice cloning failed (HTTP 500).` — Gnani's voice-clone
+*embeddings* endpoint (`POST /api/v1/tts/voice-clone/embeddings`) answered HTTP 500.
+
+**Root cause** (per https://docs.gnani.ai/api/introduction/errors): HTTP 500 on the embeddings
+endpoint is an "unexpected failure" — which the docs note can include reference audio it cannot
+process — and **`429/500/503/504` are documented as retryable with exponential backoff**; we
+called the endpoint exactly once and gave up on the first 500. The error body was also mishandled:
+Voice Cloning (like TTS) returns a **flat** body `{"success": false, "message": ..., "status_code": N}`,
+but the `>=400` fallback kept only the raw text and never used the provider's own `message`, so
+the UI showed a bare "HTTP 500" with no explanation.
+
+**Fix**: `GnaniVoiceCloneService._post_embeddings` now retries `429/500/503/504` with exponential
+backoff (0.5 s, 1 s; up to 3 attempts) before raising, and a new `_body_message` extracts the
+provider's message from the flat body (and the gateway `detail` / `422 detail[]` shapes), so the
+real reason reaches the UI on the final failure. The Step-2 cloned-synthesis path already sends
+the REQUIRED `audio_config` and surfaces the provider body, so no change was needed there. See
+`docs/DECISIONS.md` §7k. Two tests were added (500-then-200 retries to success; a persistent 500
+surfaces the provider message). If the 500 persists after retries it likely means the reference
+audio (or the account's cloning scope) is the problem — see `docs/BLOCKERS.md`.
 
 ## BUG 1 — RAG grounding false negatives
 

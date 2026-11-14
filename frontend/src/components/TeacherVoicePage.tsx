@@ -218,7 +218,7 @@ export const TeacherVoicePage: React.FC = () => {
   const limitReached = usableCount >= maxProfiles;
   // A recorded sample must be long enough; an out-of-range sample can never be
   // cloned, so submitting it only ever produced an opaque HTTP 400.
-  const sampleTooShort = mode === "record" && seconds > 0 && seconds < MIN_SECONDS;
+  const sampleTooShort = mode === "record" && !!sampleBlob && seconds < MIN_SECONDS;
 
   const canSubmit =
     consentChecked &&

@@ -6,7 +6,7 @@ obvious. `.env.example` lists every variable; do **not** commit a real `.env`.
 Quick automated checks:
 
 ```
-python -m pytest tests/backend -q      # expect: 126 passed
+python -m pytest tests/backend -q      # expect: 128 passed
 cd frontend ; npm run build            # expect: exit 0
 cd frontend ; npx vitest run           # expect: 13 passed
 ```
@@ -169,6 +169,6 @@ the real provider.
 | `StudentExperience.test.tsx` (question-language selector) | 2 | Selector default + persistence |
 | `test_tts.py` (success/missing key/401/402/403/429/timeout/corrupt/endpoint default) | 3 | TTS error + endpoint behaviour |
 | `test_student_experience.py::test_tts_speak_fallback_when_voice_fails` | 3 | Cloned→default fallback with notice |
-| `test_voice_profiles.py` (31 tests: consent, roles, isolation, validation, cap, rate limit, provider errors, revoke/delete) | Feature | Teacher voice cloning end to end (mocked) |
+| `test_voice_profiles.py` (33 tests: consent, roles, isolation, validation, cap, rate limit, provider errors incl. 500-retry, revoke/delete) | Feature | Teacher voice cloning end to end (mocked) |
 | `TeacherVoice.test.tsx` (consent gate, status badges, preview label, delete) | Feature | Teacher "My Voice" page |
 | `StudentExperience.test.tsx` (teacher voice sample with disclosure label) | Feature | Student voice list + label |

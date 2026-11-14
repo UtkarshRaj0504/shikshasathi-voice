@@ -43,6 +43,15 @@ retry. If `POST /voice-profiles` fails, read the error code in the response/UI f
 `PROFILE_LIMIT_REACHED` means the cap (delete a profile), while `VOICE_CLONE_*` points at the
 provider/account.
 
+**Note (Bug 9)**: an HTTP `500` from the embeddings endpoint is now **retried** with exponential
+backoff (`429/500/503/504`, 3 attempts — per the docs' "Retrying" section) before it surfaces as
+`VOICE_CLONE_PROVIDER_ERROR` (HTTP 502) **with Gnani's own message** instead of a bare status.
+A 500 that survives the retries is *not* necessarily a transient outage: the docs list
+"unexpected failure, including … an invalid `speaker_embedding` or reference audio" under 500, so
+it can also mean the reference clip was rejected — try a clean 5-25 s WAV recorded in a quiet room
+(our recorder and the server validate that range). If clean audio still 500s every time, escalate
+to Gnani support with the request timestamp and the message text.
+
 ### Previously Resolved
 - ✅ TTS mock vs real provider selection (fixed in DECISIONS.md decision 4a)
 - ✅ Voice model/voice pairing (timbre-v3.0 + Lakshmi documented)
