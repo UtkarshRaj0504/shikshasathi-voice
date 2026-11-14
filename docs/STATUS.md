@@ -15,7 +15,7 @@ network calls) and committed.
 | Bug 8 — `POST /voice-profiles` failed with an opaque HTTP 400 ("not cloning") | Done | `f3e7c3f` |
 | Bug 9 — `VOICE_CLONE_PROVIDER_ERROR` (Gnani embeddings HTTP 500 not retried) | Done | `c544f81` |
 | Bug 10 — same HTTP 500 persisted: browser WebM/Opus audio sent to the provider | Done | `7ea77dc` |
-| Bug 11 — `TTS_RATE_LIMIT` (Gnani HTTP 429 not retried) + aliased in-browser downsample | Done | `ede919b` |
+| Bug 11 — `TTS_RATE_LIMIT` (Gnani HTTP 429 not retried) + aliased in-browser downsample | Done | `52be774` |
 | Feature — Teacher voice cloning (Gnani Vachana) | Done | `e43f81c` |
 
 ## Test results (last run)
