@@ -34,16 +34,9 @@ def get_engine():
                 cursor.execute("PRAGMA foreign_keys=ON")
                 cursor.close()
         else:
-            url = settings.DATABASE_URL
+            url = settings.SQLALCHEMY_DATABASE_URL
             connect_args = {"check_same_thread": False} if url.startswith("sqlite") else {}
-            try:
-                _engine = create_engine(url, echo=settings.APP_DEBUG, connect_args=connect_args)
-            except Exception:
-                _engine = create_engine(
-                    "sqlite:///./shikshasathi.db",
-                    connect_args={"check_same_thread": False},
-                    echo=settings.APP_DEBUG,
-                )
+            _engine = create_engine(url, echo=settings.APP_DEBUG, connect_args=connect_args)
 
             if str(_engine.url).startswith("sqlite"):
                 @event.listens_for(_engine, "connect")

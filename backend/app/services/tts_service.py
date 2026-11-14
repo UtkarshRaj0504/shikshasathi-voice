@@ -22,6 +22,7 @@ import json
 import logging
 import math
 import os
+import re
 import struct
 import sys
 import time
@@ -29,6 +30,7 @@ import time
 import httpx
 
 from app.core.config import settings
+from app.services.gnani_gate import GnaniSlot
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +48,21 @@ RETRYABLE_STATUS_CODES = frozenset({429, 500, 503, 504})
 MAX_TTS_ATTEMPTS = 4  # 1 initial call + 3 retries
 BASE_RETRY_BACKOFF_SECONDS = 0.5
 MAX_RETRY_BACKOFF_SECONDS = 8.0
+
+# Gnani rejects text longer than ~2000 characters with a generic HTTP 500
+# ("We are facing technical difficulties…"), so long answers are split into
+# sentence-aligned chunks and the resulting audio is concatenated (see
+# _split_text_for_tts / _concat_wav).
+GNANI_MAX_TEXT_CHARS = 1200
+
+# Gnani synthesis is slow (~10s for 200 chars, ~20s for 1000). A short client
+# timeout aborts a request Gnani is still processing, which leaves its single
+# active-request slot busy and makes the *next* call fail with HTTP 429. Budget
+# generously so real synthesis always completes.
+GNANI_REQUEST_TIMEOUT_SECONDS = 90.0
+
+# A letter or digit the voice can actually read (Unicode, so Indian scripts match).
+_SPEAKABLE_TEXT_RE = re.compile(r"[^\W_]", re.UNICODE)
 
 
 def _retry_after_header(response: httpx.Response | None) -> str:
@@ -253,6 +270,105 @@ def _wrap_pcm_as_wav(pcm: bytes, sample_rate: int) -> bytes:
     return bytes(header + pcm)
 
 
+def _has_speakable_text(text: str) -> bool:
+    """True when the text holds at least one letter/digit the voice can read.
+
+    Gnani answers an emoji/punctuation-only chunk with HTTP 500
+    ("No audio generated during synthesis"), so such chunks are dropped instead
+    of being sent.
+    """
+    return bool(_SPEAKABLE_TEXT_RE.search(text or ""))
+
+
+def _split_text_for_tts(text: str, max_chars: int = GNANI_MAX_TEXT_CHARS) -> list[str]:
+    """Split text into speakable chunks of at most ``max_chars`` characters.
+
+    Gnani returns a generic HTTP 500 for text over ~2000 characters. Long answers
+    are therefore broken on sentence boundaries (then word boundaries) so the full
+    answer is still spoken.
+    """
+    remaining = (text or "").strip()
+    if len(remaining) <= max_chars:
+        return [remaining] if _has_speakable_text(remaining) else []
+
+    chunks: list[str] = []
+    while len(remaining) > max_chars:
+        window = remaining[:max_chars]
+        split_at = -1
+        for sep in (". ", "! ", "? ", "। ", "\n"):
+            idx = window.rfind(sep)
+            if idx > split_at:
+                split_at = idx + 1  # keep the sentence punctuation with the sentence
+        if split_at < max_chars // 2:
+            split_at = window.rfind(" ")
+        if split_at <= 0:
+            split_at = max_chars
+        piece = remaining[:split_at].strip()
+        if _has_speakable_text(piece):
+            chunks.append(piece)
+        remaining = remaining[split_at:].strip()
+
+    if remaining and _has_speakable_text(remaining):
+        chunks.append(remaining)
+    return chunks
+
+
+def _wav_pcm_and_format(body: bytes) -> tuple[bytes, bytes] | None:
+    """Return (pcm_data, fmt_chunk) for a RIFF/WAVE body, or None if it is not WAV."""
+    if len(body) < 44 or body[:4] != b"RIFF" or body[8:12] != b"WAVE":
+        return None
+    pos = 12
+    fmt: bytes | None = None
+    data: bytes | None = None
+    while pos + 8 <= len(body):
+        chunk_id = body[pos : pos + 4]
+        size = struct.unpack("<I", body[pos + 4 : pos + 8])[0]
+        chunk = body[pos + 8 : pos + 8 + size]
+        if chunk_id == b"fmt ":
+            fmt = chunk
+        elif chunk_id == b"data":
+            data = chunk
+        pos += 8 + size + (size & 1)
+    if fmt is None or data is None:
+        return None
+    return data, fmt
+
+
+def _concat_wav(parts: list[bytes]) -> bytes:
+    """Join several same-format WAV byte strings into one playable WAV.
+
+    All chunks are requested with the same ``audio_config``, so their PCM streams
+    share a format and can be appended behind a single header. Gnani may emit a
+    streaming placeholder RIFF size, so a fresh header is always written.
+    """
+    if len(parts) == 1:
+        return parts[0]
+
+    fmt: bytes | None = None
+    pcm = bytearray()
+    for part in parts:
+        parsed = _wav_pcm_and_format(part)
+        if parsed is None:
+            # A part in another container: fall back to a plain concatenation
+            # rather than dropping audio.
+            return b"".join(parts)
+        data, part_fmt = parsed
+        if fmt is None:
+            fmt = part_fmt
+        pcm.extend(data)
+
+    header = bytearray()
+    header.extend(b"RIFF")
+    header.extend(struct.pack("<I", 4 + (8 + len(fmt)) + (8 + len(pcm))))
+    header.extend(b"WAVE")
+    header.extend(b"fmt ")
+    header.extend(struct.pack("<I", len(fmt)))
+    header.extend(fmt)
+    header.extend(b"data")
+    header.extend(struct.pack("<I", len(pcm)))
+    return bytes(header) + bytes(pcm)
+
+
 class GnaniTimbreTTSService(TTSService):
     """
     Real Gnani Timbre & voice-cloned TTS (Vachana API).
@@ -347,6 +463,29 @@ class GnaniTimbreTTSService(TTSService):
             raise TTSError("Cannot synthesize empty text.", status_code=400, error_code="EMPTY_TEXT")
 
         lang_code = self._normalize_language(language)
+        # Gnani 500s on text over ~2000 characters, so a long answer is spoken in
+        # sentence-aligned chunks and the audio is stitched back into one WAV.
+        chunks = _split_text_for_tts(text)
+        if not chunks:
+            raise TTSError(
+                "Cannot synthesize text without any spoken content.",
+                status_code=400,
+                error_code="EMPTY_TEXT",
+            )
+
+        parts = [
+            self._synthesize_chunk(chunk, lang_code=lang_code, voice_id=voice_id, is_cloned=is_cloned)
+            for chunk in chunks
+        ]
+        return _concat_wav(parts)
+
+    def _synthesize_chunk(
+        self,
+        text: str,
+        lang_code: str,
+        voice_id: str | None,
+        is_cloned: bool,
+    ) -> bytes:
         headers = {
             "X-API-Key-ID": self.api_key,
             "Content-Type": "application/json",
@@ -362,7 +501,7 @@ class GnaniTimbreTTSService(TTSService):
 
         if is_cloned:
             payload = {
-                "text": text.strip(),
+                "text": text,
                 "model": self.MODEL_VOICE_CLONE,
                 "speaker_embedding": parse_speaker_embedding(voice_id or ""),
                 "language": lang_code,
@@ -371,7 +510,7 @@ class GnaniTimbreTTSService(TTSService):
             }
         else:
             payload = {
-                "text": text.strip(),
+                "text": text,
                 "model": self.model,
                 "voice": self.default_voice,
                 "language": lang_code,
@@ -381,61 +520,71 @@ class GnaniTimbreTTSService(TTSService):
 
         def _post(req_payload: dict) -> httpx.Response:
             try:
-                with httpx.Client(timeout=20.0) as client:
+                with httpx.Client(timeout=httpx.Timeout(GNANI_REQUEST_TIMEOUT_SECONDS, connect=10.0)) as client:
                     return client.post(self.endpoint, headers=headers, json=req_payload)
             except httpx.TimeoutException:
                 raise TTSError("Gnani TTS service timed out. Please try again.", status_code=504, error_code="TTS_TIMEOUT")
             except httpx.RequestError:
                 raise TTSError("Network error connecting to Gnani TTS service.", status_code=502, error_code="TTS_NETWORK")
 
-        res = None
-        retried_with_auto = False
-        for attempt in range(MAX_TTS_ATTEMPTS):
-            request_payload = {**payload, "language": "auto"} if retried_with_auto else payload
-            res = _post(request_payload)
-            if res.status_code not in RETRYABLE_STATUS_CODES:
-                break
-            if res.status_code == 500 and not retried_with_auto and lang_code != "auto":
-                # Gnani returns a generic HTTP 500 ("We are facing technical difficulties")
-                # when it cannot process the requested language for this text. Retry once
-                # with script-based auto-detection so non-English audio is still produced.
-                logger.warning("Gnani TTS returned HTTP 500 for language %s; retrying with 'auto'.", lang_code)
-                retried_with_auto = True
-                continue
-            if attempt < MAX_TTS_ATTEMPTS - 1:
-                delay = retry_delay_seconds(res, attempt)
-                logger.warning(
-                    "Gnani TTS returned HTTP %s; retrying in %.1fs (attempt %d/%d).",
-                    res.status_code,
-                    delay,
-                    attempt + 1,
-                    MAX_TTS_ATTEMPTS,
+        # Gnani allows only one active request per account, shared with the STT
+        # service: wait for that slot instead of colliding into HTTP 429.
+        with GnaniSlot() as acquired:
+            if not acquired:
+                raise TTSError(
+                    "TTS is busy with another request. Please try again.",
+                    status_code=429,
+                    error_code="TTS_RATE_LIMIT",
                 )
-                time.sleep(delay)
 
-        if res.status_code in (401, 403):
-            raise TTSError(
-                "Gnani TTS authentication failed. Check API key configuration.",
-                status_code=502,
-                error_code="TTS_AUTH",
-            )
-        if res.status_code == 402:
-            raise TTSError("Gnani TTS credit or quota limit reached.", status_code=502, error_code="TTS_QUOTA")
-        if res.status_code == 429:
-            raise TTSError(
-                "Gnani TTS rate limit exceeded. Please try again in a minute.",
-                status_code=429,
-                error_code="TTS_RATE_LIMIT",
-            )
-        if res.status_code >= 400:
-            snippet = _sanitize_error_text(res.text, self.api_key)
-            raise TTSError(
-                f"Gnani TTS request failed (HTTP {res.status_code}): {snippet}",
-                status_code=502,
-                error_code="TTS_PROVIDER_ERROR",
-            )
+            res = None
+            retried_with_auto = False
+            for attempt in range(MAX_TTS_ATTEMPTS):
+                request_payload = {**payload, "language": "auto"} if retried_with_auto else payload
+                res = _post(request_payload)
+                if res.status_code not in RETRYABLE_STATUS_CODES:
+                    break
+                if res.status_code == 500 and not retried_with_auto and lang_code != "auto":
+                    # Gnani returns a generic HTTP 500 ("We are facing technical difficulties")
+                    # when it cannot process the requested language for this text. Retry once
+                    # with script-based auto-detection so non-English audio is still produced.
+                    logger.warning("Gnani TTS returned HTTP 500 for language %s; retrying with 'auto'.", lang_code)
+                    retried_with_auto = True
+                    continue
+                if attempt < MAX_TTS_ATTEMPTS - 1:
+                    delay = retry_delay_seconds(res, attempt)
+                    logger.warning(
+                        "Gnani TTS returned HTTP %s; retrying in %.1fs (attempt %d/%d).",
+                        res.status_code,
+                        delay,
+                        attempt + 1,
+                        MAX_TTS_ATTEMPTS,
+                    )
+                    time.sleep(delay)
 
-        return extract_audio_from_response(res, self.api_key)
+            if res.status_code in (401, 403):
+                raise TTSError(
+                    "Gnani TTS authentication failed. Check API key configuration.",
+                    status_code=502,
+                    error_code="TTS_AUTH",
+                )
+            if res.status_code == 402:
+                raise TTSError("Gnani TTS credit or quota limit reached.", status_code=502, error_code="TTS_QUOTA")
+            if res.status_code == 429:
+                raise TTSError(
+                    "Gnani TTS rate limit exceeded. Please try again in a minute.",
+                    status_code=429,
+                    error_code="TTS_RATE_LIMIT",
+                )
+            if res.status_code >= 400:
+                snippet = _sanitize_error_text(res.text, self.api_key)
+                raise TTSError(
+                    f"Gnani TTS request failed (HTTP {res.status_code}): {snippet}",
+                    status_code=502,
+                    error_code="TTS_PROVIDER_ERROR",
+                )
+
+            return extract_audio_from_response(res, self.api_key)
 
 
 def get_tts_service() -> TTSService:

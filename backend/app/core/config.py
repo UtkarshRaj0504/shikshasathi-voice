@@ -3,7 +3,10 @@ Application-wide settings loaded from environment variables.
 """
 
 from pathlib import Path
+from typing import Literal
+
 from pydantic_settings import BaseSettings
+from sqlalchemy.engine import URL
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent.parent
 REPO_ROOT = BACKEND_DIR.parent
@@ -23,7 +26,37 @@ class Settings(BaseSettings):
     DATABASE_NAME: str = "shikshasaathi"
     DATABASE_USER: str = "postgres"
     DATABASE_PASSWORD: str = "changeme"
-    DATABASE_URL: str = "sqlite:///./shikshasathi.db"
+    DATABASE_URL: str = ""
+
+    @property
+    def SQLALCHEMY_DATABASE_URL(self) -> str:
+        """Normalize the single deployment URL, with legacy fields for local development."""
+        url = (self.DATABASE_URL or "").strip()
+        if url:
+            if url.startswith("postgres://"):
+                return "postgresql://" + url[len("postgres://"):]
+            return url
+
+        legacy_fields = {
+            "DATABASE_HOST",
+            "DATABASE_PORT",
+            "DATABASE_NAME",
+            "DATABASE_USER",
+            "DATABASE_PASSWORD",
+        }
+        if self.model_fields_set.intersection(legacy_fields):
+            return URL.create(
+                "postgresql+psycopg2",
+                username=self.DATABASE_USER,
+                password=self.DATABASE_PASSWORD,
+                host=self.DATABASE_HOST,
+                port=self.DATABASE_PORT,
+                database=self.DATABASE_NAME,
+            ).render_as_string(hide_password=False)
+
+        return "sqlite:///./shikshasathi.db"
+
+    STORAGE_PROVIDER: Literal["database", "local"] = "local"
 
     # JWT
     JWT_ALGORITHM: str = "HS256"
@@ -41,11 +74,13 @@ class Settings(BaseSettings):
     MAX_UPLOAD_SIZE_MB: int = 20
 
     # CORS
-    CORS_ORIGINS: list[str] = ["http://localhost:5173", "http://127.0.0.1:5173"]
+    ALLOWED_ORIGINS: str = "http://localhost:5173,http://127.0.0.1:5173"
+
+    @property
+    def allowed_origins(self) -> list[str]:
+        return [origin.strip() for origin in self.ALLOWED_ORIGINS.split(",") if origin.strip()]
 
     # Frontend
-    VITE_API_BASE_URL: str = "http://localhost:8000"
-
     # Gnani API keys & AI providers
     STT_PROVIDER: str = "auto"
     TTS_PROVIDER: str = "auto"

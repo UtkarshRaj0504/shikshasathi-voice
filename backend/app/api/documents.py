@@ -6,8 +6,9 @@ import os
 import uuid
 import mimetypes
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile, status
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from sqlalchemy.orm import Session
+from urllib.parse import quote
 
 from app.core.config import settings
 from app.core.database import get_db
@@ -54,24 +55,30 @@ async def upload_document(
     # 3. Validate file size (max 20 MB)
     max_bytes = settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024
     contents = await file.read()
+    await file.close()
     if len(contents) > max_bytes:
         raise HTTPException(
             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
             detail=f"File exceeds maximum size of {settings.MAX_UPLOAD_SIZE_MB}MB"
         )
 
-    # 4. Save file to UPLOAD_DIR
-    os.makedirs(settings.UPLOAD_DIR, exist_ok=True)
-    unique_filename = f"{uuid.uuid4()}_{filename}"
-    file_path = os.path.join(settings.UPLOAD_DIR, unique_filename)
-
-    with open(file_path, "wb") as f:
-        f.write(contents)
+    # Keep durable production uploads in PostgreSQL; local development keeps files on disk.
+    file_path: str | None = None
+    file_data: bytes | None = None
+    if settings.STORAGE_PROVIDER == "database":
+        file_data = contents
+    else:
+        os.makedirs(settings.UPLOAD_DIR, exist_ok=True)
+        unique_filename = f"{uuid.uuid4()}_{filename}"
+        file_path = os.path.join(settings.UPLOAD_DIR, unique_filename)
+        with open(file_path, "wb") as f:
+            f.write(contents)
 
     # 5. Create Document DB record (status: pending)
     doc = Document(
         filename=filename,
         file_path=file_path,
+        file_data=file_data,
         status="pending",
         chapter_id=chapter.id,
     )
@@ -144,9 +151,6 @@ def get_document_file(
     else:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
 
-    if not os.path.exists(doc.file_path):
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found on storage")
-
     content_type, _ = mimetypes.guess_type(doc.filename)
     if not content_type:
         ext = os.path.splitext(doc.filename)[1].lower()
@@ -158,6 +162,18 @@ def get_document_file(
             content_type = "text/plain; charset=utf-8"
         else:
             content_type = "application/octet-stream"
+
+    if doc.file_data is not None:
+        return Response(
+            content=doc.file_data,
+            media_type=content_type,
+            headers={
+                "Content-Disposition": f"inline; filename*=UTF-8''{quote(doc.filename)}"
+            },
+        )
+
+    if not doc.file_path or not os.path.exists(doc.file_path):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found on storage")
 
     return FileResponse(
         path=doc.file_path,
@@ -184,7 +200,7 @@ def delete_document(
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
 
     # Remove file from disk if it exists
-    if os.path.exists(doc.file_path):
+    if doc.file_path and os.path.exists(doc.file_path):
         try:
             os.remove(doc.file_path)
         except Exception:

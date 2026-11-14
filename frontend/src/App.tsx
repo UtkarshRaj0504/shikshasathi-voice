@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 import { BrowserRouter, Routes, Route, Navigate, useNavigate, useLocation } from "react-router-dom";
 import { MotionConfig } from "framer-motion";
-import { getToken, removeToken, api } from "./services/api";
+import { BackendUnavailableError, getToken, removeToken, api } from "./services/api";
 import { Login } from "./components/Login";
 import { TeacherDashboard } from "./components/TeacherDashboard";
 import { StudentDashboard } from "./components/StudentDashboard";
@@ -28,6 +28,7 @@ function AppPage() {
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
   const [user, setUser] = useState<any>(null);
   const [loading, setLoading] = useState<boolean>(true);
+  const [backendIssue, setBackendIssue] = useState<string | null>(null);
 
   const checkAuth = async () => {
     const token = getToken();
@@ -36,9 +37,12 @@ function AppPage() {
         const u = await api.getMe();
         setUser(u);
         setIsAuthenticated(true);
-      } catch {
+      } catch (error) {
         setUser(null);
         setIsAuthenticated(false);
+        if (error instanceof BackendUnavailableError) {
+          setBackendIssue(error.message);
+        }
       } finally {
         setLoading(false);
       }
@@ -60,6 +64,29 @@ function AppPage() {
             <div className="skeleton loading-heading" />
             <div className="skeleton loading-line" />
             <div className="skeleton loading-line loading-line-short" />
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (backendIssue) {
+    return (
+      <div className="app-shell">
+        <div className="auth-wrap">
+          <div className="auth-card">
+            <h1>Service is starting</h1>
+            <p className="auth-sub" role="alert">{backendIssue}</p>
+            <button
+              className="btn btn-primary"
+              onClick={() => {
+                setBackendIssue(null);
+                setLoading(true);
+                void checkAuth();
+              }}
+            >
+              Retry connection <span className="arrow" aria-hidden="true">→</span>
+            </button>
           </div>
         </div>
       </div>

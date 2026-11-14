@@ -19,9 +19,6 @@ from app.api.tts import router as tts_router
 from app.api.voice_profiles import router as voice_profiles_router
 from app.core.config import settings
 from app.core.database import Base, SessionLocal, get_engine
-from app.core.security import hash_password
-from app.models.user import User
-from app.db.seed import TEST_ACCOUNTS
 
 app = FastAPI(
     title="ShikshaSaathi Voice API",
@@ -32,7 +29,7 @@ app = FastAPI(
 # CORS — allow the Vite dev server during development
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.CORS_ORIGINS,
+    allow_origins=settings.allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -84,16 +81,38 @@ def on_startup():
         llm_svc = get_llm_service()
         vc_svc = get_voice_clone_service()
         embedding_real = getattr(embedding_service, "is_real_model", False)
+        stt_mock = stt_svc.__class__.__name__.startswith("Mock")
+        llm_mock = llm_svc.__class__.__name__.startswith("Mock")
+        voice_clone_mock = getattr(vc_svc, "is_mock", False)
         print("=" * 65)
         print("ShikshaSaathi Voice Active Providers:")
-        print(f"  STT:        {stt_svc.__class__.__name__} (config: {settings.STT_PROVIDER}, mock: {stt_svc.__class__.__name__.startswith('Mock')})")
-        print(f"  TTS:        {tts_svc.__class__.__name__} (config: {settings.TTS_PROVIDER}, mock: {tts_svc.is_mock})")
-        print(f"  LLM:        {llm_svc.__class__.__name__} (config: {settings.LLM_PROVIDER}, model: {settings.LLM_MODEL})")
-        print(f"  Embedding:  {embedding_service.active_model_name} (real: {embedding_real}, dim: {embedding_service.dimension})")
-        print(f"  VoiceClone: {vc_svc.__class__.__name__} (config: {settings.VOICE_CLONE_PROVIDER}, mock: {getattr(vc_svc, 'is_mock', None)})")
+        print(
+            f"  STT:        {stt_svc.__class__.__name__} "
+            f"(provider: {settings.STT_PROVIDER}, mode: {'mock' if stt_mock else 'real'})"
+        )
+        print(
+            f"  TTS:        {tts_svc.__class__.__name__} "
+            f"(provider: {settings.TTS_PROVIDER}, mode: {'mock' if tts_svc.is_mock else 'real'})"
+        )
+        print(
+            f"  LLM:        {llm_svc.__class__.__name__} "
+            f"(provider: {settings.LLM_PROVIDER}, model: {settings.LLM_MODEL}, "
+            f"mode: {'mock' if llm_mock else 'real'})"
+        )
+        print(
+            f"  Embedding:  {embedding_service.active_model_name} "
+            f"(provider: {'sentence-transformers' if embedding_real else 'mock'}, "
+            f"mode: {'real' if embedding_real else 'mock'}, dim: {embedding_service.dimension})"
+        )
+        print(
+            f"  VoiceClone: {vc_svc.__class__.__name__} "
+            f"(provider: {settings.VOICE_CLONE_PROVIDER}, "
+            f"mode: {'mock' if voice_clone_mock else 'real'})"
+        )
+        print(f"  Storage:    {settings.STORAGE_PROVIDER} (mode: real)")
         print("=" * 65)
-    except Exception as e:
-        print(f"Active provider display error: {e}")
+    except Exception:
+        print("Active provider display unavailable (details suppressed).")
 
     # Warn (without secrets) when stored chunks were indexed with a different model.
     if "pytest" not in sys.modules and os.getenv("APP_ENV") != "test":
@@ -115,30 +134,6 @@ def on_startup():
 
     if "pytest" in sys.modules or os.getenv("APP_ENV") == "test":
         return
-
-    # Seed default test accounts from centralized config
-    db = SessionLocal()
-    try:
-        for account in TEST_ACCOUNTS:
-            existing = db.query(User).filter(User.email == account["email"]).first()
-            if not existing:
-                user = User(
-                    email=account["email"],
-                    name=account["name"],
-                    hashed_password=hash_password(account["password"]),
-                    role=account["role"],
-                    is_active=True,
-                )
-                db.add(user)
-                db.commit()
-                db.refresh(user)
-                print(f"✓ Seeded test account: {account['email']} / {account['password']}")
-
-    except Exception as e:
-        print(f"Startup seeding error: {e}")
-    finally:
-        db.close()
-
 
 # Routers
 app.include_router(auth_router)

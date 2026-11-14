@@ -346,7 +346,11 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ onLogout }) 
       }, 1000);
     } catch (err: any) {
       console.error("Mic access denied:", err);
-      setError("Microphone access was denied or is not supported. Please check microphone permissions.");
+      setError(
+        !window.isSecureContext
+          ? "Microphone access requires a secure HTTPS page. Open ShikshaSaathi over HTTPS, or use a supported localhost address."
+          : "Microphone access was denied or is not supported. Check browser permissions, or try again using HTTPS."
+      );
     }
   };
 

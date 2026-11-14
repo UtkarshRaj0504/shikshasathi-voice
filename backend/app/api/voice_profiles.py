@@ -273,7 +273,10 @@ def create_voice_profile(
             },
         )
 
-    audio_bytes = file.file.read()
+    try:
+        audio_bytes = file.file.read()
+    finally:
+        file.file.close()
     try:
         validate_reference_audio(audio_bytes, file.filename, file.content_type)
         # Browsers record WebM/Opus, which the provider cannot decode (it answers with
@@ -281,6 +284,7 @@ def create_voice_profile(
         # length before it reaches the provider.
         audio_bytes = normalize_reference_audio(audio_bytes)
     except AudioValidationError as e:
+        audio_bytes = b""
         logger.warning("Reference audio rejected for teacher %s: %s", teacher.id, e.message)
         raise HTTPException(
             status_code=e.status_code,
@@ -308,6 +312,8 @@ def create_voice_profile(
             status_code=e.status_code,
             detail={"code": e.error_code, "message": e.message},
         )
+    finally:
+        audio_bytes = b""
 
     profile = VoiceProfile(
         teacher_id=teacher.id,

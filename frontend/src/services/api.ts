@@ -3,6 +3,26 @@ API client helper for backend communication.
 */
 
 const TOKEN_KEY = "shiksha_token";
+const API_BASE_URL = (import.meta.env.VITE_API_URL || "").trim().replace(/\/+$/, "");
+
+export class BackendUnavailableError extends Error {
+  constructor(message = "The backend is unreachable or is still waking up. Please wait a moment and try again.") {
+    super(message);
+    this.name = "BackendUnavailableError";
+  }
+}
+
+function apiUrl(endpoint: string): string {
+  return `${API_BASE_URL}${endpoint}`;
+}
+
+function ensureApiConfigured(): void {
+  if (!API_BASE_URL) {
+    throw new BackendUnavailableError(
+      "The backend URL is not configured. Set VITE_API_URL in the frontend environment and rebuild or redeploy."
+    );
+  }
+}
 
 export function getToken(): string | null {
   return localStorage.getItem(TOKEN_KEY);
@@ -17,6 +37,7 @@ export function removeToken(): void {
 }
 
 async function request(endpoint: string, options: RequestInit = {}) {
+  ensureApiConfigured();
   const token = getToken();
   const headers: HeadersInit = {
     ...(options.headers || {}),
@@ -30,10 +51,18 @@ async function request(endpoint: string, options: RequestInit = {}) {
     (headers as Record<string, string>)["Authorization"] = `Bearer ${token}`;
   }
 
-  const res = await fetch(`/api${endpoint}`, {
-    ...options,
-    headers,
-  });
+  let res: Response;
+  try {
+    res = await fetch(apiUrl(endpoint), { ...options, headers });
+  } catch {
+    throw new BackendUnavailableError();
+  }
+
+  if ([502, 503, 504].includes(res.status)) {
+    throw new BackendUnavailableError(
+      "The backend is starting or temporarily unavailable. Please wait a moment and retry."
+    );
+  }
 
   if (res.status === 204) {
     return null;
@@ -111,12 +140,23 @@ export const api = {
     request(`/documents/${documentId}`, { method: "DELETE" }),
 
   fetchDocumentFile: async (documentId: number): Promise<ArrayBuffer> => {
+    ensureApiConfigured();
     const token = getToken();
     const headers: HeadersInit = {};
     if (token) {
       headers["Authorization"] = `Bearer ${token}`;
     }
-    const res = await fetch(`/api/documents/${documentId}/file`, { headers });
+    let res: Response;
+    try {
+      res = await fetch(apiUrl(`/documents/${documentId}/file`), { headers });
+    } catch {
+      throw new BackendUnavailableError();
+    }
+    if ([502, 503, 504].includes(res.status)) {
+      throw new BackendUnavailableError(
+        "The backend is starting or temporarily unavailable. Please wait a moment and retry."
+      );
+    }
     if (!res.ok) {
       const errData = await res.json().catch(() => ({}));
       throw new Error(errData.detail || `Failed to fetch file (${res.status})`);

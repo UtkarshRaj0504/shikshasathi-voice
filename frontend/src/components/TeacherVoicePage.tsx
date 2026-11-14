@@ -183,7 +183,11 @@ export const TeacherVoicePage: React.FC = () => {
         });
       }, 1000);
     } catch (err: any) {
-      setError("Microphone access was denied or is not supported. Please check permissions or upload a file instead.");
+      setError(
+        !window.isSecureContext
+          ? "Microphone access requires a secure HTTPS page. Open ShikshaSaathi over HTTPS, or upload an audio sample instead."
+          : "Microphone access was denied or is not supported. Check browser permissions or upload an audio sample instead."
+      );
     }
   };
 

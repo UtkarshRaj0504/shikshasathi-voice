@@ -472,6 +472,53 @@ def test_ask_kannada_question_retrieves_english_chunk(client, db_session):
     assert any(s["document_name"] == "biology.txt" for s in data["sources"])
 
 
+class RefuseOnceLLMService(FakeLLMService):
+    """Refuses once (marker) then answers: models the Gemini non-English refusal bug."""
+
+    def __init__(self, translation: str, answer: str):
+        super().__init__(answer=answer, translation=translation)
+        self.calls = 0
+
+    def generate_answer(self, prompt: str, system_prompt: str = "") -> str:
+        self.calls += 1
+        self.last_prompt = prompt
+        self.last_system_prompt = system_prompt
+        return NOT_IN_MATERIAL_MARKER if self.calls == 1 else self._answer
+
+
+def test_ask_non_english_refusal_is_retried_in_target_language(client, db_session):
+    """A non-English question the LLM first refuses must be retried and answered.
+
+    Regression: the model occasionally emitted the refusal marker for non-Hindi/
+    English questions even though retrieval returned the correct English chunk.
+    The endpoint now retries once, supplying the English translation.
+    """
+    token = _student_and_token(client, "retry_lang")
+    fake = FakeEmbeddingService()
+    content = "Photosynthesis is the process plants use to convert light energy into chemical energy."
+    chapter, document, chunk = _create_materials(db_session, "biology.txt", content, fake.embed_passage(content))
+
+    kannada_question = "ದ್ಯುತಿಸಂಶ್ಲೇಷಣೆ ಎಂದರೇನು?"
+    answer_text = "ದ್ಯುತಿಸಂಶ್ಲೇಷಣೆಯು ಸಸ್ಯಗಳು ಬೆಳಕಿನ ಶಕ್ತಿಯನ್ನು ರಾಸಾಯನಿಕ ಶಕ್ತಿಯಾಗಿ ಪರಿವರ್ತಿಸುವ ಪ್ರಕ್ರಿಯೆ."
+    llm = RefuseOnceLLMService(translation="What is photosynthesis?", answer=answer_text)
+    with patch("app.api.ask.embedding_service", fake), patch("app.api.ask.get_llm_service", return_value=llm):
+        res = client.post(
+            "/ask",
+            json={"question": kannada_question, "chapter_id": chapter.id, "answer_language": "kn", "level": "intermediate"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert res.status_code == 200
+    data = res.json()
+    assert llm.calls == 2  # the refusal triggered exactly one retry
+    assert data["grounded"] is True
+    assert data["answer"] == answer_text
+    assert any(s["document_name"] == "biology.txt" for s in data["sources"])
+    # The retry prompt carries the English translation and forbids the marker.
+    assert "What is photosynthesis?" in llm.last_prompt
+    assert NOT_IN_MATERIAL_MARKER in llm.last_system_prompt
+
+
 def test_ask_english_question_is_not_rewritten(client, db_session):
     """An English question must not trigger a translation round-trip."""
     token = _student_and_token(client, "no_rewrite")

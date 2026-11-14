@@ -3,6 +3,7 @@ Speech-to-Text (STT) service abstraction with Mock and Gnani Prisma implementati
 """
 
 from abc import ABC, abstractmethod
+import asyncio
 import io
 import logging
 import os
@@ -11,6 +12,7 @@ import httpx
 from fastapi import HTTPException, status
 
 from app.core.config import settings
+from app.services.gnani_gate import GnaniSlot
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +56,24 @@ LANGUAGE_CODE_MAP = {
 
 # The documented auto-detect value for Prisma v3.0.
 DEFAULT_LANGUAGE_CODE = "indic-auto"
+
+# Gnani allows a single active request per account, shared with the TTS service.
+# A voice question asked while the previous answer is still being synthesised was
+# rejected with HTTP 429; retrying with backoff lets it succeed once the slot frees.
+STT_MAX_ATTEMPTS = 3  # 1 initial call + 2 retries
+STT_RETRYABLE_STATUS_CODES = frozenset({429, 500, 503, 504})
+STT_BASE_BACKOFF_SECONDS = 0.5
+STT_MAX_BACKOFF_SECONDS = 4.0
+
+
+def stt_retry_delay_seconds(attempt: int, retry_after: str = "") -> float:
+    """Backoff before retry ``attempt`` (0-based), honouring a Retry-After value."""
+    if isinstance(retry_after, str) and retry_after.strip():
+        try:
+            return min(max(float(retry_after), 0.0), STT_MAX_BACKOFF_SECONDS)
+        except (TypeError, ValueError):
+            pass
+    return min(STT_BASE_BACKOFF_SECONDS * (2 ** attempt), STT_MAX_BACKOFF_SECONDS)
 
 
 def normalize_language_code(language_code: str) -> str:
@@ -171,7 +191,32 @@ class GnaniPrismaSTTService(STTService):
 
         try:
             async with httpx.AsyncClient(timeout=45.0) as client:
-                response = await client.post(endpoint, headers=headers, files=files, data=data)
+                # The Gnani account (shared with the TTS service) allows only one
+                # active request: wait for the slot instead of colliding into 429.
+                async with GnaniSlot() as acquired:
+                    if not acquired:
+                        raise HTTPException(
+                            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                            detail="Speech service is busy with another request. Please try again.",
+                        )
+
+                    response = None
+                    for attempt in range(STT_MAX_ATTEMPTS):
+                        response = await client.post(endpoint, headers=headers, files=files, data=data)
+                        if response.status_code not in STT_RETRYABLE_STATUS_CODES:
+                            break
+                        if attempt < STT_MAX_ATTEMPTS - 1:
+                            delay = stt_retry_delay_seconds(
+                                attempt, response.headers.get("Retry-After", "")
+                            )
+                            logger.warning(
+                                "Gnani STT returned HTTP %s; retrying in %.1fs (attempt %d/%d).",
+                                response.status_code,
+                                delay,
+                                attempt + 1,
+                                STT_MAX_ATTEMPTS,
+                            )
+                            await asyncio.sleep(delay)
 
                 if response.status_code == 401:
                     raise HTTPException(

@@ -340,15 +340,20 @@ def ask_question(
     llm_service = get_llm_service()
 
     # 1. Build the list of query phrasings. A non-English question is rewritten
-    #    into English so it can be matched against English study material.
+    #    into English so it can be matched against English study material. The
+    #    translation is also kept so it can anchor the answer prompt for
+    #    non-English questions (see step 5).
+    is_non_english = looks_non_english(body.question)
+    translated_question = ""
     questions = [body.question]
-    if looks_non_english(body.question):
+    if is_non_english:
         try:
             rewritten = (llm_service.rewrite_query(body.question) or "").strip()
         except Exception as exc:  # translation is best-effort, never fatal
             logger.warning("Query rewrite failed, using original question only: %s", exc)
             rewritten = ""
         if rewritten and rewritten.lower() != body.question.strip().lower():
+            translated_question = rewritten
             questions.append(rewritten)
 
     # 2. Vector & keyword similarity search over DocumentChunk (best score per chunk).
@@ -439,6 +444,45 @@ def ask_question(
 
     # 4. Grounded is decided by the LLM's refusal marker, not by the threshold.
     llm_marker = NOT_IN_MATERIAL_MARKER in (answer or "")
+
+    # 5. A non-English question asks the model to translate English context into
+    #    the answer language, and it occasionally gives up and emits the refusal
+    #    marker even though the retrieved context is relevant. When that happens
+    #    for a non-English question, retry once with the English translation
+    #    supplied and an explicit "translate the context" instruction. This only
+    #    runs after a refusal, so the working English/Hindi answers are unaffected.
+    if llm_marker and is_non_english:
+        retry_system_prompt = (
+            "You are ShikshaSaathi, an expert multilingual educational AI tutor for students. "
+            "The Study Material Context is written in English. The student asked in "
+            f"{target_lang}; translate and explain the relevant information from the context "
+            f"into {target_lang}. A translated explanation is still grounded in the context - do "
+            f"not refuse merely because the question and the context are in different languages. "
+            f"Only reply with {NOT_IN_MATERIAL_MARKER} if the context is genuinely unrelated to "
+            f"the question.\n"
+            f"Pedagogical Level: {level_instruction}"
+        )
+        retry_prompt_parts = [
+            f"Study Material Context:\n{context_str}\n\n",
+            f"Student Question: {body.question}\n",
+        ]
+        if translated_question:
+            retry_prompt_parts.append(f"English translation of the question: {translated_question}\n")
+        retry_prompt_parts.append(
+            f"\nAnswer the question in {target_lang} by translating and explaining the relevant "
+            f"information from the Study Material Context above."
+        )
+        try:
+            retry_answer = (
+                llm_service.generate_answer("".join(retry_prompt_parts), system_prompt=retry_system_prompt) or ""
+            ).strip()
+        except Exception as exc:  # a failed retry must never break the response
+            logger.warning("Language-preserving retry failed: %s", exc)
+            retry_answer = ""
+        if retry_answer and NOT_IN_MATERIAL_MARKER not in retry_answer:
+            answer = retry_answer
+            llm_marker = False
+
     refusal_reason = "llm_marker" if llm_marker else None
 
     if settings.RAG_DEBUG:

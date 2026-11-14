@@ -104,6 +104,51 @@ def test_document_upload_and_processing(client, db_session):
     assert doc_status["status"] == "ready"
 
 
+def test_database_storage_upload_stream_and_delete(client, db_session, monkeypatch):
+    monkeypatch.setattr("app.api.documents.settings.STORAGE_PROVIDER", "database")
+    token = register_and_login(client, "databaseprof@example.com", "Database Prof", "teacher")
+    subj_id = client.post(
+        "/subjects",
+        json={"name": "Botany"},
+        headers={"Authorization": f"Bearer {token}"},
+    ).json()["id"]
+    chap_id = client.post(
+        f"/subjects/{subj_id}/chapters",
+        json={"title": "Plant Cells"},
+        headers={"Authorization": f"Bearer {token}"},
+    ).json()["id"]
+    content = b"Chloroplasts capture light energy for photosynthesis."
+
+    response = client.post(
+        f"/chapters/{chap_id}/documents/upload",
+        files={"file": ("plant_cells.txt", io.BytesIO(content), "text/plain")},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 202
+    document_id = response.json()["id"]
+    document = db_session.get(Document, document_id)
+    assert document is not None
+    assert document.file_path is None
+    assert document.file_data == content
+    assert document.status == "ready"
+
+    streamed = client.get(
+        f"/documents/{document_id}/file",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert streamed.status_code == 200
+    assert streamed.content == content
+    assert "plant_cells.txt" in streamed.headers["content-disposition"]
+
+    deleted = client.delete(
+        f"/documents/{document_id}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert deleted.status_code == 204
+    assert db_session.get(Document, document_id) is None
+
+
 def test_document_upload_invalid_type(client):
     token = register_and_login(client, "badprof@example.com", "Bad Prof", "teacher")
     subj_id = client.post("/subjects", json={"name": "Math"}, headers={"Authorization": f"Bearer {token}"}).json()["id"]

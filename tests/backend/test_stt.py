@@ -204,14 +204,17 @@ async def test_gnani_service_errors():
             await service.transcribe(b"audio", "en", "audio.webm")
         assert "402" in str(exc_info.value)
 
-    # 429 Too Many Requests
+    # 429 Too Many Requests is retried with backoff before it is surfaced.
     resp_429 = AsyncMock()
     resp_429.status_code = 429
+    resp_429.headers = {}
     with patch("app.services.stt_service.settings.GNANI_API_KEY", "key"), \
-         patch("httpx.AsyncClient.post", return_value=resp_429):
+         patch("app.services.stt_service.stt_retry_delay_seconds", return_value=0.0), \
+         patch("httpx.AsyncClient.post", return_value=resp_429) as mock_post:
         with pytest.raises(Exception) as exc_info:
             await service.transcribe(b"audio", "en", "audio.webm")
         assert "429" in str(exc_info.value)
+        assert mock_post.call_count == 3
 
     # Timeout
     with patch("app.services.stt_service.settings.GNANI_API_KEY", "key"), \

@@ -30,7 +30,11 @@ def process_document(document_id: int):
         db.commit()
 
         # 1. Extract pages with page numbers
-        pages = extract_document_pages(doc.file_path, doc.filename)
+        pages = extract_document_pages(
+            doc.file_path,
+            doc.filename,
+            file_data=doc.file_data,
+        )
         if not pages:
             raise ValueError(
                 "No extractable text found. The document may be a scanned image PDF "
