@@ -131,6 +131,32 @@ describe("StudentDashboard Flow", () => {
     });
   });
 
+  it("plays a teacher voice sample with the disclosure label in the Choose Voice step", async () => {
+    vi.spyOn(api, "previewVoiceProfile").mockResolvedValue({
+      audio_base64: "UklGRgAAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=",
+      content_type: "audio/wav",
+      label: "AI-generated voice, authorized by the teacher.",
+      is_mock: true,
+    });
+
+    render(<StudentDashboard onLogout={vi.fn()} />);
+
+    await waitFor(() => expect(screen.getByText(/Science/i)).toBeInTheDocument());
+    fireEvent.change(screen.getByRole("combobox"), { target: { value: "10" } });
+    await waitFor(() => expect(screen.getByText(/Light - Reflection & Refraction/i)).toBeInTheDocument());
+    fireEvent.click(screen.getByText(/Light - Reflection & Refraction/i));
+    fireEvent.click(screen.getByRole("button", { name: /Continue to Choose Teacher Voice/i }));
+
+    const sampleBtn = await screen.findByTestId("sample-voice-201");
+    fireEvent.click(sampleBtn);
+
+    await waitFor(() => {
+      expect(
+        screen.getAllByText("AI-generated voice, authorized by the teacher.").length
+      ).toBeGreaterThan(0);
+    });
+  });
+
   it("defaults the question language to auto-detect and persists the student's choice", async () => {
     vi.spyOn(api, "getDocuments").mockResolvedValue([
       { id: 301, chapter_id: 101, filename: "notes.txt", status: "ready" },

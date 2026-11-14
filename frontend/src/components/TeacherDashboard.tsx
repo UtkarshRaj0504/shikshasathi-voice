@@ -1,11 +1,13 @@
 import React, { useEffect, useState } from "react";
 import { api, removeToken } from "../services/api";
+import { TeacherVoicePage } from "./TeacherVoicePage";
 
 interface TeacherDashboardProps {
   onLogout: () => void;
 }
 
 export function TeacherDashboard({ onLogout }: TeacherDashboardProps) {
+  const [view, setView] = useState<"materials" | "voice">("materials");
   const [user, setUser] = useState<any>(null);
   const [subjects, setSubjects] = useState<any[]>([]);
   const [selectedSubject, setSelectedSubject] = useState<any>(null);
@@ -178,6 +180,21 @@ export function TeacherDashboard({ onLogout }: TeacherDashboardProps) {
           Sign Out
         </button>
 
+        <div style={{ display: "flex", gap: "0.4rem", marginBottom: "1.5rem" }}>
+          <button
+            onClick={() => setView("materials")}
+            style={{ flex: 1, padding: "0.4rem", borderRadius: "4px", border: "1px solid #ced4da", cursor: "pointer", background: view === "materials" ? "#0d6efd" : "#fff", color: view === "materials" ? "#fff" : "#212529" }}
+          >
+            📚 Materials
+          </button>
+          <button
+            onClick={() => setView("voice")}
+            style={{ flex: 1, padding: "0.4rem", borderRadius: "4px", border: "1px solid #ced4da", cursor: "pointer", background: view === "voice" ? "#0d6efd" : "#fff", color: view === "voice" ? "#fff" : "#212529" }}
+          >
+            🎙️ My Voice
+          </button>
+        </div>
+
         <h4>📚 Subjects</h4>
         <form onSubmit={handleCreateSubject} style={{ marginTop: "0.5rem", marginBottom: "1rem" }}>
           <input
@@ -231,6 +248,10 @@ export function TeacherDashboard({ onLogout }: TeacherDashboardProps) {
 
       {/* Main Content Area */}
       <main style={{ flex: 1, padding: "2rem" }}>
+        {view === "voice" ? (
+          <TeacherVoicePage />
+        ) : (
+          <>
         {error && <div style={{ color: "red", background: "#f8d7da", padding: "0.75rem", borderRadius: "4px", marginBottom: "1rem" }}>{error}</div>}
 
         {!selectedSubject ? (
@@ -337,6 +358,8 @@ export function TeacherDashboard({ onLogout }: TeacherDashboardProps) {
               </div>
             </div>
           </div>
+        )}
+          </>
         )}
       </main>
     </div>

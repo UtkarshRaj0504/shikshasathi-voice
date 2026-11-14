@@ -138,6 +138,35 @@ export const api = {
 
   getVoices: () => request("/voices"),
 
+  // ---- Teacher voice cloning (teacher only) ----
+  getVoiceConsent: () => request("/voice-profiles/consent"),
+
+  getVoiceProfiles: () => request("/voice-profiles"),
+
+  createVoiceProfile: (
+    file: File | Blob,
+    voiceName: string,
+    consentConfirmed: boolean,
+    languages?: string,
+    filename = "sample.wav"
+  ) => {
+    const formData = new FormData();
+    formData.append("file", file, filename);
+    formData.append("voice_name", voiceName);
+    formData.append("consent_confirmed", consentConfirmed ? "true" : "false");
+    if (languages) formData.append("languages", languages);
+    return request("/voice-profiles", { method: "POST", body: formData });
+  },
+
+  previewVoiceProfile: (id: number) =>
+    request(`/voice-profiles/${id}/preview`, { method: "POST" }),
+
+  deleteVoiceProfile: (id: number) =>
+    request(`/voice-profiles/${id}`, { method: "DELETE" }),
+
+  revokeVoiceProfile: (id: number) =>
+    request(`/voice-profiles/${id}/revoke`, { method: "POST" }),
+
   speakText: (text: string, voiceProfileId: number | null, language: string = "en") =>
     request("/tts/speak", {
       method: "POST",

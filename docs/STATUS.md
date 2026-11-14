@@ -1,20 +1,23 @@
-# Bug Fix Session — ShikshaSaathi Voice (final status)
+# ShikshaSaathi Voice — status
 
-All bugs are fixed, tested (mocked, no real network calls) and committed.
+Bug fixes and the teacher voice-cloning feature are implemented, tested (mocked, no real
+network calls) and committed.
 
-| Bug | Status | Commit |
-|-----|--------|--------|
-| 1 — RAG says "not covered" for covered questions | Done | `2534949` |
-| 2 — English speech transcribed as Hindi | Done | `aa5b1c2` |
-| 3 — `TTS_NOT_CONFIGURED` teacher audio | Done | `ed662dc` |
-| 4 — Non-English questions always refused | Done | `f2fa86d` |
-| 5 — Non-English output audio failed (TTS HTTP 500) | Done | (this commit) |
+| Item | Status | Commit |
+|------|--------|--------|
+| Bug 1 — RAG says "not covered" for covered questions | Done | `2534949` |
+| Bug 2 — English speech transcribed as Hindi | Done | `aa5b1c2` |
+| Bug 3 — `TTS_NOT_CONFIGURED` teacher audio | Done | `ed662dc` |
+| Bug 4 — Non-English questions always refused | Done | `f2fa86d` |
+| Bug 5 — Non-English output audio failed (TTS HTTP 500) | Done | `c4695a3` |
+| Bug 6 — Latest-answer-only study UI (no conversation log) | Done | `e1bbe3d` |
+| Feature — Teacher voice cloning (Gnani Vachana) | Done | (this commit) |
 
 ## Test results (last run)
 
-- Backend: `python -m pytest tests/backend -q` → **109 passed**.
+- Backend: `python -m pytest tests/backend -q` → **125 passed**.
 - Frontend: `npm run build` → exit 0 (only the pre-existing pdfjs `eval` and chunk-size warnings).
-- Frontend unit tests: `npx vitest run` → **7 passed**.
+- Frontend unit tests: `npx vitest run` → **13 passed** (2 files).
 
 ## BUG 1 — RAG grounding false negatives
 
@@ -79,6 +82,72 @@ short codes expanded: `hi` → `hi-IN`), fall back to script auto-detection (`au
 Gnani cannot speak (e.g. Assamese), and retry once with `auto` if Gnani still returns HTTP 500
 — so audio is produced in the language of the answer's script.
 
+## FEATURE — Teacher voice cloning (Gnani Vachana)
+
+Teachers can clone their own voice from a short recording; students can then hear answers in
+that teacher's cloned voice in the study page.
+
+**Flow / contract (verified against https://docs.gnani.ai Voice Cloning pages):**
+
+1. Reference audio → `POST https://api.vachana.ai/api/v1/tts/voice-clone/embeddings`
+   (header `X-API-Key-ID`, multipart field `audio_file`, clean WAV/MP3, 5–30 s). The response
+   returns a **speaker embedding** (`data.voice_clone_embedding.{embedding,shape,dtype}`), not
+   an opaque voice id. We store that embedding JSON as `VoiceProfile.gnani_voice_id`.
+2. Cloned synthesis → the existing `GnaniTimbreTTSService` REST call
+   `POST https://api.vachana.ai/api/v1/tts/inference` with model `vachana-vc-v1` and the stored
+   `speaker_embedding`. This is a plain REST call (no SSE), so the backend returns a single audio
+   blob — no stream assembly needed.
+3. There is **no documented voice-delete endpoint**, so `delete_voice` is a best-effort no-op
+   (recorded in DECISIONS 7b); revoking/deleting a profile only removes it on our side.
+
+**Backend**
+
+- `VoiceCloneService` interface (`create_voice`, `synthesize_with_cloned_voice`, `delete_voice`,
+  `is_mock`) with `MockVoiceCloneService` and `GnaniVoiceCloneService`, selected by
+  `VOICE_CLONE_PROVIDER` (default `mock`; tests always get the mock).
+- `VoiceConsent` table (Alembic `004_voice_clone`): teacher_id, consent_text_version, full
+  consent text, confirmed, IP, user agent, revoked_at/revoke_reason, timestamps.
+- `VoiceProfile`: teacher_id, voice_name, `gnani_voice_id` (embedding JSON), languages, status
+  (`pending`/`active`/`failed`/`revoked`), consent_confirmed, sample path, timestamps.
+- Teacher-only endpoints: `GET /voice-profiles/consent`, `POST /voice-profiles`
+  (multipart file + name + `consent_confirmed=true`; rejects without consent, validates duration
+  5–30 s, size and type, converts WebM→WAV), `GET /voice-profiles` (own only),
+  `POST /voice-profiles/{id}/preview`, `POST /voice-profiles/{id}/revoke`,
+  `DELETE /voice-profiles/{id}`. Students get 403; a teacher only ever sees their own profiles.
+- A profile becomes **active only through the consent flow**; the old bypass that set
+  `consent_confirmed` was removed. `/me/preferences` accepts a `voice_profile_id` only if it is
+  an active, non-revoked, consent-confirmed profile.
+- Rate limits: profile creation and preview are limited per teacher
+  (`VOICE_CLONE_CREATE_RATE_LIMIT` / `VOICE_CLONE_PREVIEW_RATE_LIMIT` within
+  `VOICE_CLONE_RATE_WINDOW_SECONDS`) and profiles are capped at `VOICE_CLONE_MAX_PROFILES` (3).
+- `/voices` lists only active profiles with confirmed, non-revoked consent; `/tts/speak` uses the
+  cloned voice when `voice_profile_id` is set, returns label
+  `"AI-generated voice, authorized by the teacher."` and, if the clone fails, plays the default
+  voice with `fallback=true` + a notice — it **never** substitutes a beep.
+
+**Frontend**
+
+- Teacher dashboard → "🎙️ My Voice": consent statement + a tick box that cannot be skipped,
+  record with `MediaRecorder` (timer, level meter, auto-stop at 30 s, re-encoded to 16 kHz WAV),
+  or upload WAV/MP3; playback before submitting; suggested 20–30 s reading script + clean-recording
+  tips; profile list with status badges, Preview / Revoke / Delete (with confirmation) and clear
+  per-failure error messages.
+- Student study page: the "Choose teacher voice" step and the header voice pill list each
+  teacher's active cloned voice by name plus a "🔊 Sample" preview button (and Default voice);
+  cloned playback always shows the disclosure label; a fallback notice appears when the default
+  voice was used; the choice is saved via `/me/preferences`.
+
+### What is real vs mocked
+
+| Piece | Status |
+|-------|--------|
+| Consent capture, validation, DB writes, role/isolation/cap/rate-limit checks | **Real** |
+| Cloned-voice playback wiring, disclosure label, fallback-with-notice | **Real** |
+| Gnani embeddings + cloned-TTS HTTP contract (URLs, headers, model, payload) | **Real (documented contract)** |
+| Network calls to Gnani during tests | **Mocked** (tests never hit the network) |
+| Voice provider when `VOICE_CLONE_PROVIDER=mock` (default) | **Mock** (synthesises a tone; labelled in the UI) |
+| Provider voice deletion | **Not available** — best-effort no-op (no documented endpoint) |
+
 ## Manual verification
 
 See `docs/MANUAL_TEST_CHECKLIST.md` for step-by-step checks.
@@ -92,4 +161,5 @@ See `docs/MANUAL_TEST_CHECKLIST.md` for step-by-step checks.
 
 ## Remaining work
 
-None — all five bugs are complete.
+None — all bug fixes and the teacher voice-cloning feature are complete. See
+`docs/BLOCKERS.md` for the (unconfirmed) account-level gating note about Gnani voice cloning.

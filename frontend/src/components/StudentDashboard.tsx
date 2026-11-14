@@ -124,6 +124,13 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ onLogout }) 
 
   // Latest question & answer (only the most recent exchange is kept)
   const [conversation, setConversation] = useState<MessageTurn[]>([]);
+  const [sampleAudio, setSampleAudio] = useState<{
+    base64: string | null;
+    contentType?: string;
+    isMock?: boolean;
+    label?: string | null;
+  } | null>(null);
+  const [sampleLoadingId, setSampleLoadingId] = useState<number | null>(null);
   const [latestAudio, setLatestAudio] = useState<{
     base64: string | null;
     contentType?: string;
@@ -507,6 +514,25 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ onLogout }) 
     return v ? `${v.teacher_name} (${v.voice_name})` : "Default Educational Voice";
   };
 
+  // Play a short sample of a teacher's cloned voice (never a beep; errors are shown).
+  const playVoiceSample = async (v: any) => {
+    setError(null);
+    setSampleLoadingId(v.id);
+    try {
+      const res = await api.previewVoiceProfile(v.id);
+      setSampleAudio({
+        base64: res.audio_base64,
+        contentType: res.content_type || "audio/wav",
+        isMock: res.is_mock,
+        label: res.label,
+      });
+    } catch (err: any) {
+      setError(err.message || "Could not play the voice sample.");
+    } finally {
+      setSampleLoadingId(null);
+    }
+  };
+
   const formatSec = (sec: number) => {
     const mins = Math.floor(sec / 60);
     const s = sec % 60;
@@ -725,11 +751,35 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ onLogout }) 
                         Voice Profile: <em>{v.voice_name}</em> • AI-generated voice, authorized by the teacher.
                       </div>
                     </div>
-                    <span style={{ fontSize: "1.3rem" }}>{isSelected ? "🔘" : "⚪"}</span>
+                    <div style={{ display: "flex", alignItems: "center", gap: "0.6rem" }}>
+                      <button
+                        type="button"
+                        data-testid={`sample-voice-${v.id}`}
+                        onClick={(e) => { e.stopPropagation(); playVoiceSample(v); }}
+                        disabled={sampleLoadingId === v.id}
+                        style={{ padding: "0.35rem 0.7rem", background: "#0d6efd", color: "#fff", border: "none", borderRadius: "4px", fontSize: "0.8rem", cursor: "pointer" }}
+                      >
+                        {sampleLoadingId === v.id ? "Loading..." : "🔊 Sample"}
+                      </button>
+                      <span style={{ fontSize: "1.3rem" }}>{isSelected ? "🔘" : "⚪"}</span>
+                    </div>
                   </div>
                 );
               })}
             </div>
+
+            {sampleAudio && (
+              <div style={{ marginBottom: "1.5rem" }}>
+                <AudioPlayer
+                  audioBase64={sampleAudio.base64}
+                  contentType={sampleAudio.contentType || "audio/wav"}
+                  isCloned={true}
+                  isMock={sampleAudio.isMock}
+                  label={sampleAudio.label}
+                  autoPlay={true}
+                />
+              </div>
+            )}
 
             <button
               onClick={() => handleSaveVoiceAndOpenReader(selectedVoiceId)}
@@ -888,6 +938,15 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ onLogout }) 
                 >
                   <strong>👨‍🏫 {v.teacher_name}'s Voice</strong> ({v.voice_name})
                   <div style={{ fontSize: "0.8rem", color: "#198754", marginTop: "0.2rem" }}>Authorized Cloned Voice</div>
+                  <button
+                    type="button"
+                    data-testid={`modal-sample-voice-${v.id}`}
+                    onClick={(e) => { e.stopPropagation(); playVoiceSample(v); }}
+                    disabled={sampleLoadingId === v.id}
+                    style={{ marginTop: "0.4rem", padding: "0.3rem 0.6rem", background: "#0d6efd", color: "#fff", border: "none", borderRadius: "4px", fontSize: "0.75rem", cursor: "pointer" }}
+                  >
+                    {sampleLoadingId === v.id ? "Loading..." : "🔊 Sample"}
+                  </button>
                 </div>
               ))}
             </div>

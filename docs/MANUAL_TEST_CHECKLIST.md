@@ -6,9 +6,9 @@ obvious. `.env.example` lists every variable; do **not** commit a real `.env`.
 Quick automated checks:
 
 ```
-python -m pytest tests/backend -q      # expect: 100 passed
+python -m pytest tests/backend -q      # expect: 125 passed
 cd frontend ; npm run build            # expect: exit 0
-cd frontend ; npx vitest run           # expect: 7 passed
+cd frontend ; npx vitest run           # expect: 13 passed
 ```
 
 ---
@@ -90,6 +90,59 @@ cd frontend ; npx vitest run           # expect: 7 passed
 
 ---
 
+## FEATURE — Teacher voice cloning (Gnani Vachana)
+
+With no `GNANI_API_KEY` (or `VOICE_CLONE_PROVIDER=mock`, the default) cloning runs against the
+**mock** provider: everything works end to end and the audio is a synthetic tone labelled in the
+UI. Set `VOICE_CLONE_PROVIDER=gnani` and a real `GNANI_API_KEY` to exercise the real API.
+
+### Teacher — create a cloned voice
+1. Log in as a **teacher**, open the dashboard and switch to the **🎙️ My Voice** tab.
+2. Read the consent statement. The **Create** button must stay disabled until you tick the
+   consent box, enter a name and provide a sample. Without the tick the submit must be blocked
+   (and a direct API call without `consent_confirmed=true` returns HTTP 400).
+3. Record: click record, read the suggested script for ~20–30 s. A timer and level meter move;
+   recording auto-stops at 30 s. Play it back before submitting.
+4. Try each failure and confirm the specific message:
+   - too short (< 5 s) → "too short" message;
+   - too long (> 30 s) → "too long" message;
+   - a `.txt`/`.pdf` file → "unsupported file" message;
+   - huge file → "file too large" message.
+5. Submit a good sample → the profile appears in the list with status **active** (a mock run
+   still shows active). Click **Preview voice** → you hear the fixed test sentence with the label
+   "AI-generated voice, authorized by the teacher.".
+6. Create profiles until you hit the cap (3) → further creates are rejected with a clear message.
+   Rapid repeats → a rate-limit message.
+7. **Revoke** a profile (with confirmation) → status becomes **revoked** and it disappears from
+   students' voice lists. **Delete** a profile → it is removed from your list; in the DB the
+   `voice_consents` audit rows for it survive with `revoked_at` set and the FK detached.
+
+### Student — use a cloned voice
+1. Log in as a **student**, open a chapter's study page.
+2. In the **Choose teacher voice** step (and the header voice pill) you see each teacher's active
+   cloned voice by teacher name, plus **Default voice**. A revoked/deleted voice must not appear.
+3. Click **🔊 Sample** on a cloned voice → it plays that teacher's test sentence with the label
+   "AI-generated voice, authorized by the teacher.".
+4. Select a cloned voice and ask a question → the answer plays in the cloned voice, always with
+   the disclosure label.
+5. Force a failure (e.g. stop the provider / use a voice whose provider id is broken): the answer
+   must play in the **default** voice with a visible fallback notice — **never** a beep and never
+   silently. If the default voice also fails, an explicit error is shown.
+6. Reload the page → your chosen voice is remembered (persisted via `/me/preferences`).
+
+### Security / role checks
+- A student calling any `/voice-profiles` endpoint → HTTP 403.
+- Teacher A cannot list, preview, revoke or delete teacher B's profile (HTTP 404 for foreign ids).
+- Students never receive the reference audio: no `/voice-profiles` payload exposes the sample.
+
+### Pass criteria
+- A profile can only become active through the consent flow; no other path sets consent.
+- Only active, non-revoked, consent-confirmed voices are selectable by students.
+- Cloned playback always shows the disclosure label; a clone failure falls back to the default
+  voice with a notice; failures are never masked by a beep.
+
+---
+
 ## Regression tests added
 
 | Test | Bug | Verifies |
@@ -105,3 +158,6 @@ cd frontend ; npx vitest run           # expect: 7 passed
 | `StudentExperience.test.tsx` (question-language selector) | 2 | Selector default + persistence |
 | `test_tts.py` (success/missing key/401/402/403/429/timeout/corrupt/endpoint default) | 3 | TTS error + endpoint behaviour |
 | `test_student_experience.py::test_tts_speak_fallback_when_voice_fails` | 3 | Cloned→default fallback with notice |
+| `test_voice_profiles.py` (30 tests: consent, roles, isolation, validation, cap, rate limit, provider errors, revoke/delete) | Feature | Teacher voice cloning end to end (mocked) |
+| `TeacherVoice.test.tsx` (consent gate, status badges, preview label, delete) | Feature | Teacher "My Voice" page |
+| `StudentExperience.test.tsx` (teacher voice sample with disclosure label) | Feature | Student voice list + label |

@@ -16,8 +16,12 @@ class VoiceProfile(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     teacher_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     voice_name: Mapped[str] = mapped_column(String(200), nullable=False)
+    # Provider reference for the cloned voice (the serialized speaker embedding for Gnani).
     gnani_voice_id: Mapped[str | None] = mapped_column(String(200), nullable=True)
-    status: Mapped[str] = mapped_column(String(50), default="active", nullable=False)
+    # Comma-separated BCP-47 language codes the teacher recorded the sample in.
+    languages: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    # pending | active | failed | revoked — a profile is only ever "active" through the consent flow.
+    status: Mapped[str] = mapped_column(String(50), default="pending", nullable=False)
     consent_confirmed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     consent_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     sample_audio_path: Mapped[str | None] = mapped_column(String(1000), nullable=True)

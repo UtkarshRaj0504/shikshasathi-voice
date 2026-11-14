@@ -1,351 +1,451 @@
 """
-Tests for teacher voice cloning endpoints and VoiceConsent workflow.
-Verifies consent requirement, role checks, teacher isolation, and revoke flow.
+Tests for teacher voice cloning (/voice-profiles) — all mocked, no network.
+
+Covers: consent gate, role checks, teacher isolation, audio validation, profile
+cap, rate limiting, revoke/delete flows, provider error mapping, the cloned-voice
+disclosure label and graceful fallback in /tts/speak, and that students never
+receive reference audio.
 """
 
-import json
+import struct
+from unittest.mock import MagicMock, patch
+
+import httpx
 import pytest
-from unittest.mock import patch, MagicMock
 from fastapi import status
 
+from app.api.voice_profiles import reset_rate_limits
+from app.models.voice_consent import VoiceConsent
+from app.models.voice_profile import VoiceProfile
+from app.services.voice_clone_service import GnaniVoiceCloneService, VoiceCloneError
 
-def _teacher_token(client, email="teacher1@example.com"):
-    """Register and login a teacher."""
+
+# --------------------------------------------------------------------------- #
+# Helpers
+# --------------------------------------------------------------------------- #
+
+def make_wav(seconds: float, sample_rate: int = 16000) -> bytes:
+    """Build a valid mono 16-bit PCM WAV of the requested length."""
+    num_samples = int(seconds * sample_rate)
+    data = b"\x00\x00" * num_samples
+    header = bytearray()
+    header.extend(b"RIFF")
+    header.extend(struct.pack("<I", 36 + len(data)))
+    header.extend(b"WAVEfmt ")
+    header.extend(struct.pack("<I", 16))
+    header.extend(struct.pack("<H", 1))  # PCM
+    header.extend(struct.pack("<H", 1))  # mono
+    header.extend(struct.pack("<I", sample_rate))
+    header.extend(struct.pack("<I", sample_rate * 2))  # byte rate
+    header.extend(struct.pack("<H", 2))  # block align
+    header.extend(struct.pack("<H", 16))  # bits per sample
+    header.extend(b"data")
+    header.extend(struct.pack("<I", len(data)))
+    return bytes(header + data)
+
+
+VALID_WAV = make_wav(10)  # 10 s -> inside the 5-30 s window
+
+
+def register_and_login(client, email, role, name="User"):
     client.post(
         "/auth/register",
-        json={"email": email, "name": "Dr. Sharma", "password": "password123", "role": "teacher"},
+        json={"email": email, "name": name, "password": "password123", "role": role},
     )
     res = client.post("/auth/login", json={"email": email, "password": "password123"})
     return res.json()["access_token"]
 
 
-def _student_token(client):
-    """Register and login a student."""
-    client.post(
-        "/auth/register",
-        json={"email": "student1@example.com", "name": "Rahul", "password": "password123", "role": "student"},
+@pytest.fixture(autouse=True)
+def _clear_rate_limits():
+    reset_rate_limits()
+    yield
+    reset_rate_limits()
+
+
+def _auth(token):
+    return {"Authorization": f"Bearer {token}"}
+
+
+def _create_profile(client, token, name="My Voice", wav=VALID_WAV, consented=True, languages="en"):
+    data = {"voice_name": name}
+    if consented:
+        data["consent_confirmed"] = "true"
+    if languages:
+        data["languages"] = languages
+    return client.post(
+        "/voice-profiles",
+        headers=_auth(token),
+        data=data,
+        files={"file": ("sample.wav", wav, "audio/wav")},
     )
-    res = client.post("/auth/login", json={"email": "student1@example.com", "password": "password123"})
-    return res.json()["access_token"]
 
 
-def test_voice_profile_endpoints_require_teacher_role(client):
-    """Students cannot access voice profile endpoints."""
-    token = _student_token(client)
+# --------------------------------------------------------------------------- #
+# Consent + role checks
+# --------------------------------------------------------------------------- #
 
-    res = client.get("/voice-profiles/consent", headers={"Authorization": f"Bearer {token}"})
-    assert res.status_code == status.HTTP_403_FORBIDDEN
-
-
-def test_get_consent_details_before_confirmation(client):
-    """Teacher can view consent text without confirming."""
-    token = _teacher_token(client)
-
-    res = client.get("/voice-profiles/consent", headers={"Authorization": f"Bearer {token}"})
-    assert res.status_code == 200
-    data = res.json()
-    assert data["confirmed"] is False
-    assert "consent_text" in data
-    assert len(data["consent_text"]) > 100
-
-
-def test_confirm_consent_creates_record(client):
-    """Teacher can confirm consent and a record is created."""
-    token = _teacher_token(client)
-
+def test_student_forbidden_on_teacher_endpoints(client):
+    token = register_and_login(client, "s1@example.com", "student")
+    assert client.get("/voice-profiles", headers=_auth(token)).status_code == 403
+    assert client.get("/voice-profiles/consent", headers=_auth(token)).status_code == 403
     res = client.post(
-        "/voice-profiles/consent/confirm",
-        headers={"Authorization": f"Bearer {token}"},
-        json={"confirmed": True},
+        "/voice-profiles",
+        headers=_auth(token),
+        data={"voice_name": "X", "consent_confirmed": "true"},
+        files={"file": ("sample.wav", VALID_WAV, "audio/wav")},
     )
-    assert res.status_code == 200
-    data = res.json()
-    assert data["status"] == "confirmed"
-    assert "confirmed_at" in data
+    assert res.status_code == 403
 
-    # Verify it's now confirmed
-    res = client.get("/voice-profiles/consent", headers={"Authorization": f"Bearer {token}"})
+
+def test_unauthenticated_rejected(client):
+    assert client.get("/voice-profiles").status_code == 401
+
+
+def test_consent_details_before_confirmation(client):
+    token = register_and_login(client, "t_consent@example.com", "teacher", "Dr. A")
+    res = client.get("/voice-profiles/consent", headers=_auth(token))
     assert res.status_code == 200
+    body = res.json()
+    assert body["confirmed"] is False
+    assert len(body["consent_text"]) > 100
+    assert body["max_profiles"] >= 1
+
+
+def test_create_without_consent_rejected_and_no_profile(client, db_session):
+    token = register_and_login(client, "t_noconsent@example.com", "teacher", "Dr. B")
+    res = _create_profile(client, token, consented=False)
+    assert res.status_code == 400
+    assert res.json()["detail"]["code"] == "CONSENT_REQUIRED"
+    # No profile may exist without consent.
+    assert db_session.query(VoiceProfile).count() == 0
+
+
+def test_create_with_consent_activates_and_records_consent(client, db_session):
+    token = register_and_login(client, "t_ok@example.com", "teacher", "Dr. C")
+    res = _create_profile(client, token)
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["status"] == "active"
+    assert body["consent_confirmed"] is True
+    assert body["voice_name"] == "My Voice"
+
+    profile = db_session.get(VoiceProfile, body["id"])
+    assert profile.status == "active"
+    assert profile.gnani_voice_id  # embedding reference stored
+
+    consents = db_session.query(VoiceConsent).filter(VoiceConsent.voice_profile_id == profile.id).all()
+    assert len(consents) == 1
+    assert consents[0].confirmed is True
+    assert consents[0].full_consent_text
+    assert consents[0].consent_text_version
+
+
+def test_consent_details_after_creation(client):
+    token = register_and_login(client, "t_after@example.com", "teacher", "Dr. D")
+    _create_profile(client, token)
+    res = client.get("/voice-profiles/consent", headers=_auth(token))
     assert res.json()["confirmed"] is True
 
 
-def test_confirm_consent_idempotent(client):
-    """Confirming consent twice is safe (idempotent)."""
-    token = _teacher_token(client)
+# --------------------------------------------------------------------------- #
+# Audio validation
+# --------------------------------------------------------------------------- #
 
-    res1 = client.post(
-        "/voice-profiles/consent/confirm",
-        headers={"Authorization": f"Bearer {token}"},
-        json={"confirmed": True},
-    )
-    assert res1.status_code == 200
-
-    res2 = client.post(
-        "/voice-profiles/consent/confirm",
-        headers={"Authorization": f"Bearer {token}"},
-        json={"confirmed": True},
-    )
-    assert res2.status_code == 200
-    assert res2.json()["status"] == "already_confirmed"
-
-
-def test_upload_reference_audio_without_consent_fails(client):
-    """Cannot upload audio without confirming consent first."""
-    token = _teacher_token(client)
-
-    audio_bytes = b"RIFF" + b"\x00" * 1000 + b"WAVEfmt " + b"\x00" * 100
-
+def test_unsupported_file_type_rejected(client):
+    token = register_and_login(client, "t_type@example.com", "teacher")
     res = client.post(
-        "/voice-profiles/upload-reference-audio",
-        headers={"Authorization": f"Bearer {token}"},
-        files={"file": ("sample.wav", audio_bytes, "audio/wav")},
+        "/voice-profiles",
+        headers=_auth(token),
+        data={"voice_name": "V", "consent_confirmed": "true"},
+        files={"file": ("notes.txt", b"not audio at all " * 100, "text/plain")},
     )
-    assert res.status_code == status.HTTP_400_BAD_REQUEST
-    assert "consent" in res.json()["detail"].lower()
+    assert res.status_code == 400
+    assert res.json()["detail"]["code"] == "INVALID_AUDIO"
 
 
-def test_upload_reference_audio_with_consent_succeeds(client):
-    """After consent, teacher can upload reference audio."""
-    token = _teacher_token(client)
+def test_too_small_sample_rejected(client):
+    token = register_and_login(client, "t_small@example.com", "teacher")
+    res = _create_profile(client, token, wav=b"RIFF\x00\x00\x00\x00WAVE" + b"\x00" * 20)
+    assert res.status_code == 400
+    assert res.json()["detail"]["code"] == "INVALID_AUDIO"
 
-    # Confirm consent first
-    client.post(
-        "/voice-profiles/consent/confirm",
-        headers={"Authorization": f"Bearer {token}"},
-        json={"confirmed": True},
-    )
 
-    audio_bytes = b"RIFF" + b"\x00" * 1000 + b"WAVEfmt " + b"\x00" * 100
+def test_too_short_duration_rejected(client):
+    token = register_and_login(client, "t_short@example.com", "teacher")
+    res = _create_profile(client, token, wav=make_wav(2))
+    assert res.status_code == 400
+    assert "5 seconds" in res.json()["detail"]["message"]
 
-    res = client.post(
-        "/voice-profiles/upload-reference-audio",
-        headers={"Authorization": f"Bearer {token}"},
-        files={"file": ("sample.wav", audio_bytes, "audio/wav")},
-    )
+
+def test_too_long_duration_rejected(client):
+    token = register_and_login(client, "t_long@example.com", "teacher")
+    res = _create_profile(client, token, wav=make_wav(40))
+    assert res.status_code == 400
+    assert "30 seconds" in res.json()["detail"]["message"]
+
+
+def test_empty_voice_name_rejected(client):
+    token = register_and_login(client, "t_name@example.com", "teacher")
+    res = _create_profile(client, token, name="   ")
+    assert res.status_code == 400
+    assert res.json()["detail"]["code"] == "INVALID_NAME"
+
+
+# --------------------------------------------------------------------------- #
+# Teacher isolation
+# --------------------------------------------------------------------------- #
+
+def test_teacher_cannot_see_other_teachers_profiles(client):
+    tok_a = register_and_login(client, "ta@example.com", "teacher", "Teacher A")
+    tok_b = register_and_login(client, "tb@example.com", "teacher", "Teacher B")
+    _create_profile(client, tok_a, name="A's voice")
+
+    res = client.get("/voice-profiles", headers=_auth(tok_b))
     assert res.status_code == 200
-    data = res.json()
-    assert data["status"] == "success"
-    assert "embedding_id" in data
+    assert res.json()["profiles"] == []
 
 
-def test_upload_reference_audio_invalid_format_rejected(client):
-    """Invalid audio formats are rejected."""
-    token = _teacher_token(client)
+def test_teacher_cannot_preview_delete_or_revoke_other_teacher_profile(client):
+    tok_a = register_and_login(client, "ta2@example.com", "teacher", "Teacher A")
+    tok_b = register_and_login(client, "tb2@example.com", "teacher", "Teacher B")
+    profile_id = _create_profile(client, tok_a, name="A's voice").json()["id"]
 
-    # Confirm consent
-    client.post(
-        "/voice-profiles/consent/confirm",
-        headers={"Authorization": f"Bearer {token}"},
-        json={"confirmed": True},
+    assert client.post(f"/voice-profiles/{profile_id}/preview", headers=_auth(tok_b)).status_code == 404
+    assert client.delete(f"/voice-profiles/{profile_id}", headers=_auth(tok_b)).status_code == 404
+    assert client.post(f"/voice-profiles/{profile_id}/revoke", headers=_auth(tok_b)).status_code == 404
+
+
+# --------------------------------------------------------------------------- #
+# Preview
+# --------------------------------------------------------------------------- #
+
+def test_preview_returns_audio_and_disclosure_label(client):
+    token = register_and_login(client, "t_prev@example.com", "teacher")
+    profile_id = _create_profile(client, token).json()["id"]
+
+    res = client.post(f"/voice-profiles/{profile_id}/preview", headers=_auth(token))
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["label"] == "AI-generated voice, authorized by the teacher."
+    assert body["audio_base64"]
+    assert body["is_mock"] is True  # tests always run the mock provider
+
+
+def test_preview_inactive_profile_rejected(client, db_session):
+    token = register_and_login(client, "t_prev2@example.com", "teacher")
+    profile = VoiceProfile(
+        teacher_id=1, voice_name="Pending", status="pending", consent_confirmed=False
     )
-
-    res = client.post(
-        "/voice-profiles/upload-reference-audio",
-        headers={"Authorization": f"Bearer {token}"},
-        files={"file": ("sample.txt", b"not audio", "text/plain")},
-    )
-    assert res.status_code == status.HTTP_400_BAD_REQUEST
+    db_session.add(profile)
+    db_session.commit()
+    res = client.post(f"/voice-profiles/{profile.id}/preview", headers=_auth(token))
+    assert res.status_code == 400
+    assert res.json()["detail"]["code"] == "PROFILE_NOT_ACTIVE"
 
 
-def test_upload_reference_audio_too_short_rejected(client):
-    """Audio shorter than 1000 bytes is rejected."""
-    token = _teacher_token(client)
+# --------------------------------------------------------------------------- #
+# Revoke / delete
+# --------------------------------------------------------------------------- #
 
-    client.post(
-        "/voice-profiles/consent/confirm",
-        headers={"Authorization": f"Bearer {token}"},
-        json={"confirmed": True},
-    )
+def test_revoke_removes_voice_and_tts_falls_back(client):
+    token = register_and_login(client, "t_rev@example.com", "teacher")
+    profile_id = _create_profile(client, token, name="Revoke Me").json()["id"]
 
-    res = client.post(
-        "/voice-profiles/upload-reference-audio",
-        headers={"Authorization": f"Bearer {token}"},
-        files={"file": ("sample.wav", b"short", "audio/wav")},
-    )
-    assert res.status_code == status.HTTP_400_BAD_REQUEST
+    # Visible to students while active.
+    student = register_and_login(client, "s_rev@example.com", "student")
+    voices = client.get("/voices", headers=_auth(student)).json()
+    assert any(v["id"] == profile_id for v in voices)
 
-
-def test_create_voice_profile_without_consent_fails(client):
-    """Cannot create profile without confirming consent."""
-    token = _teacher_token(client)
-
-    res = client.post(
-        "/voice-profiles/create",
-        headers={"Authorization": f"Bearer {token}"},
-        json={"voice_name": "My Voice"},
-    )
-    assert res.status_code == status.HTTP_400_BAD_REQUEST
-
-
-def test_create_voice_profile_with_consent_succeeds(client):
-    """After consent, teacher can create a voice profile."""
-    token = _teacher_token(client)
-
-    # Confirm consent
-    client.post(
-        "/voice-profiles/consent/confirm",
-        headers={"Authorization": f"Bearer {token}"},
-        json={"confirmed": True},
-    )
-
-    res = client.post(
-        "/voice-profiles/create",
-        headers={"Authorization": f"Bearer {token}"},
-        json={"voice_name": "Dr. Sharma's Teaching Voice"},
-    )
+    res = client.post(f"/voice-profiles/{profile_id}/revoke", headers=_auth(token))
     assert res.status_code == 200
-    data = res.json()
-    assert data["voice_name"] == "Dr. Sharma's Teaching Voice"
-    assert data["status"] == "active"
-    assert data["consent_confirmed"] is True
+    assert res.json()["status"] == "revoked"
+    assert res.json()["consent_confirmed"] is False
 
+    # Removed from the student voice list.
+    voices = client.get("/voices", headers=_auth(student)).json()
+    assert all(v["id"] != profile_id for v in voices)
 
-def test_list_teacher_profiles_isolated(client):
-    """Teachers only see their own profiles."""
-    token1 = _teacher_token(client, "teacher_a@example.com")
-    token2 = _teacher_token(client, "teacher_b@example.com")  # Different teacher
-
-    # Teacher 1 creates a profile
-    client.post(
-        "/voice-profiles/consent/confirm",
-        headers={"Authorization": f"Bearer {token1}"},
-        json={"confirmed": True},
+    # /tts/speak falls back to the default voice, never a beep.
+    speak = client.post(
+        "/tts/speak",
+        headers=_auth(student),
+        json={"text": "Hello there", "voice_profile_id": profile_id, "language": "en"},
     )
-    client.post(
-        "/voice-profiles/create",
-        headers={"Authorization": f"Bearer {token1}"},
-        json={"voice_name": "Teacher 1 Voice"},
-    )
-
-    # Teacher 2 creates a profile
-    client.post(
-        "/voice-profiles/consent/confirm",
-        headers={"Authorization": f"Bearer {token2}"},
-        json={"confirmed": True},
-    )
-    client.post(
-        "/voice-profiles/create",
-        headers={"Authorization": f"Bearer {token2}"},
-        json={"voice_name": "Teacher 2 Voice"},
-    )
-
-    # Teacher 1 lists profiles — should only see their own
-    res = client.get("/voice-profiles/list", headers={"Authorization": f"Bearer {token1}"})
-    assert res.status_code == 200
-    profiles = res.json()["profiles"]
-    assert len(profiles) == 1
-    assert profiles[0]["voice_name"] == "Teacher 1 Voice"
+    assert speak.status_code == 200, speak.text
+    body = speak.json()
+    assert body["fallback"] is True
+    assert body["is_cloned"] is False
+    assert body["voice_used"] == "default"
+    assert body["audio_base64"]
 
 
-def test_delete_profile_revokes_consent(client):
-    """Deleting a profile revokes consent and marks it unavailable."""
-    token = _teacher_token(client)
+def test_delete_removes_profile_and_revokes_consent(client, db_session):
+    token = register_and_login(client, "t_del@example.com", "teacher")
+    profile_id = _create_profile(client, token, name="Delete Me").json()["id"]
 
-    # Create profile
-    client.post(
-        "/voice-profiles/consent/confirm",
-        headers={"Authorization": f"Bearer {token}"},
-        json={"confirmed": True},
-    )
-    res = client.post(
-        "/voice-profiles/create",
-        headers={"Authorization": f"Bearer {token}"},
-        json={"voice_name": "Voice to Delete"},
-    )
-    profile_id = res.json()["id"]
-
-    # Delete it
-    res = client.delete(
-        f"/voice-profiles/{profile_id}",
-        headers={"Authorization": f"Bearer {token}"},
-    )
+    res = client.delete(f"/voice-profiles/{profile_id}", headers=_auth(token))
     assert res.status_code == 200
     assert res.json()["status"] == "deleted"
 
-    # Verify it's gone
-    res = client.get(
-        f"/voice-profiles/{profile_id}",
-        headers={"Authorization": f"Bearer {token}"},
-    )
-    assert res.status_code == status.HTTP_404_NOT_FOUND
+    assert db_session.get(VoiceProfile, profile_id) is None
+    # The consent audit trail survives the profile deletion (the FK is detached).
+    consents = db_session.query(VoiceConsent).all()
+    assert consents and all(c.revoked_at is not None for c in consents)
 
 
-def test_revoke_consent_deactivates_profile(client):
-    """Revoking consent marks profile as inactive but keeps it."""
-    token = _teacher_token(client)
+# --------------------------------------------------------------------------- #
+# Cloned playback via /tts/speak
+# --------------------------------------------------------------------------- #
 
-    # Create profile
-    client.post(
-        "/voice-profiles/consent/confirm",
-        headers={"Authorization": f"Bearer {token}"},
-        json={"confirmed": True},
-    )
+def test_tts_speak_uses_cloned_voice_with_label(client):
+    token = register_and_login(client, "t_tts@example.com", "teacher")
+    profile_id = _create_profile(client, token).json()["id"]
+
+    student = register_and_login(client, "s_tts@example.com", "student")
     res = client.post(
-        "/voice-profiles/create",
-        headers={"Authorization": f"Bearer {token}"},
-        json={"voice_name": "Voice to Revoke"},
+        "/tts/speak",
+        headers=_auth(student),
+        json={"text": "Explain photosynthesis", "voice_profile_id": profile_id, "language": "en"},
     )
-    profile_id = res.json()["id"]
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["is_cloned"] is True
+    assert body["voice_used"] == "cloned"
+    assert body["fallback"] is False
+    assert body["label"] == "AI-generated voice, authorized by the teacher."
 
-    # Revoke consent
-    res = client.post(
-        f"/voice-profiles/{profile_id}/revoke-consent",
-        headers={"Authorization": f"Bearer {token}"},
+
+# --------------------------------------------------------------------------- #
+# Students never receive reference audio
+# --------------------------------------------------------------------------- #
+
+def test_voices_list_never_exposes_reference_audio(client):
+    token = register_and_login(client, "t_sec@example.com", "teacher")
+    _create_profile(client, token, name="Secure Voice")
+    student = register_and_login(client, "s_sec@example.com", "student")
+
+    voices = client.get("/voices", headers=_auth(student)).json()
+    assert voices
+    for v in voices:
+        assert "audio" not in str(v.keys()).lower()
+        assert "sample_audio_path" not in v
+        assert "gnani_voice_id" not in v
+        assert "consent_text" not in v
+
+
+# --------------------------------------------------------------------------- #
+# Profile cap + rate limiting
+# --------------------------------------------------------------------------- #
+
+def test_profile_cap_enforced(client):
+    token = register_and_login(client, "t_cap@example.com", "teacher")
+    for i in range(3):
+        assert _create_profile(client, token, name=f"Voice {i}").status_code == 200
+
+    res = _create_profile(client, token, name="One too many")
+    assert res.status_code == 400
+    assert res.json()["detail"]["code"] == "PROFILE_LIMIT_REACHED"
+
+
+def test_create_rate_limited(client, monkeypatch):
+    from app.api import voice_profiles as vp
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "VOICE_CLONE_CREATE_RATE_LIMIT", 2)
+    monkeypatch.setattr(settings, "VOICE_CLONE_MAX_PROFILES", 100)
+    token = register_and_login(client, "t_rate@example.com", "teacher")
+
+    assert _create_profile(client, token, name="V1").status_code == 200
+    assert _create_profile(client, token, name="V2").status_code == 200
+    res = _create_profile(client, token, name="V3")
+    assert res.status_code == 429
+    assert res.json()["detail"]["code"] == "VOICE_CLONE_RATE_LIMIT"
+    _ = vp
+
+
+# --------------------------------------------------------------------------- #
+# Provider error mapping (service level, httpx mocked — no network)
+# --------------------------------------------------------------------------- #
+
+def _fake_response(status_code, json_body=None, text=""):
+    res = MagicMock()
+    res.status_code = status_code
+    res.json.return_value = json_body or {}
+    res.text = text
+    return res
+
+
+@pytest.mark.parametrize(
+    "http_status,expected_code,expected_status",
+    [
+        (401, "VOICE_CLONE_AUTH", 502),
+        (402, "VOICE_CLONE_QUOTA", 502),
+        (403, "VOICE_CLONE_FORBIDDEN", 502),
+        (429, "VOICE_CLONE_RATE_LIMIT", 429),
+        (400, "VOICE_CLONE_BAD_AUDIO", 400),
+        (500, "VOICE_CLONE_PROVIDER_ERROR", 502),
+    ],
+)
+@patch("app.services.voice_clone_service.httpx.Client")
+def test_gnani_create_voice_error_mapping(mock_client, http_status, expected_code, expected_status):
+    mock_client.return_value.__enter__.return_value.post.return_value = _fake_response(
+        http_status, {"detail": {"error_code": "X", "message": "boom"}}, text="boom"
     )
-    assert res.status_code == 200
+    svc = GnaniVoiceCloneService(api_key="dummy-key")
+    with pytest.raises(VoiceCloneError) as exc:
+        svc.create_voice(b"x" * 2000, "sample.wav")
+    assert exc.value.error_code == expected_code
+    assert exc.value.status_code == expected_status
 
-    # Verify profile is now inactive
-    res = client.get(
-        f"/voice-profiles/{profile_id}",
-        headers={"Authorization": f"Bearer {token}"},
+
+@patch("app.services.voice_clone_service.httpx.Client")
+def test_gnani_create_voice_timeout_mapped(mock_client):
+    mock_client.return_value.__enter__.return_value.post.side_effect = httpx.TimeoutException("t")
+    svc = GnaniVoiceCloneService(api_key="dummy-key")
+    with pytest.raises(VoiceCloneError) as exc:
+        svc.create_voice(b"x" * 2000, "sample.wav")
+    assert exc.value.error_code == "VOICE_CLONE_TIMEOUT"
+    assert exc.value.status_code == 504
+
+
+@patch("app.services.voice_clone_service.httpx.Client")
+def test_gnani_create_voice_success_parses_embedding(mock_client):
+    mock_client.return_value.__enter__.return_value.post.return_value = _fake_response(
+        200,
+        {
+            "success": True,
+            "data": {
+                "voice_clone_embedding": {
+                    "embedding": "abc123",
+                    "shape": [1, 768],
+                    "dtype": "torch.bfloat16",
+                }
+            },
+        },
     )
-    assert res.status_code == 200
-    data = res.json()
-    assert data["status"] == "inactive"
-    assert data["consent_confirmed"] is False
+    svc = GnaniVoiceCloneService(api_key="dummy-key")
+    ref = svc.create_voice(b"x" * 2000, "sample.wav")
+    assert "abc123" in ref
 
 
-def test_voices_list_excludes_revoked_profiles(client, db_session):
-    """GET /voices only returns active profiles with confirmed consent."""
-    from app.models.user import User, UserRole
-    from app.core.security import hash_password
-    from app.models.voice_profile import VoiceProfile
+def test_create_surfaces_provider_error_to_client(client, monkeypatch):
+    """A VOICE_CLONE_FORBIDDEN from the provider becomes a clear HTTP error."""
+    from app.api import voice_profiles as vp
 
-    # Create teacher with profile
-    teacher = User(
-        email="teacher_voices@example.com",
-        name="Dr. Voices",
-        hashed_password=hash_password("pass"),
-        role=UserRole.teacher,
-    )
-    db_session.add(teacher)
-    db_session.commit()
+    class _ForbiddenService:
+        is_mock = False
 
-    profile_active = VoiceProfile(
-        teacher_id=teacher.id,
-        voice_name="Active Voice",
-        status="active",
-        consent_confirmed=True,
-    )
-    profile_inactive = VoiceProfile(
-        teacher_id=teacher.id,
-        voice_name="Inactive Voice",
-        status="inactive",
-        consent_confirmed=False,
-    )
-    db_session.add(profile_active)
-    db_session.add(profile_inactive)
-    db_session.commit()
+        def create_voice(self, audio_bytes, filename="sample.wav"):
+            raise VoiceCloneError(
+                "Voice cloning is not enabled for this Gnani account (HTTP 403).",
+                status_code=502,
+                error_code="VOICE_CLONE_FORBIDDEN",
+            )
 
-    # List voices (as any authenticated user)
-    token = _student_token(client)
-    res = client.get("/voices", headers={"Authorization": f"Bearer {token}"})
-    assert res.status_code == 200
-    voices = res.json()
+    monkeypatch.setattr(vp, "get_voice_clone_service", lambda: _ForbiddenService())
 
-    # Only active profile with confirmed consent should appear
-    active_voices = [v for v in voices if v["voice_name"] == "Active Voice"]
-    inactive_voices = [v for v in voices if v["voice_name"] == "Inactive Voice"]
-
-    assert len(active_voices) == 1
-    assert len(inactive_voices) == 0
+    token = register_and_login(client, "t_err@example.com", "teacher")
+    res = _create_profile(client, token)
+    assert res.status_code == 502
+    assert res.json()["detail"]["code"] == "VOICE_CLONE_FORBIDDEN"

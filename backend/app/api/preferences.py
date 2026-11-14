@@ -102,14 +102,13 @@ def update_preferences(
 
 
 @router.get("/voices", response_model=list[VoiceProfileItem])
-@router.get("/voice-profiles", response_model=list[VoiceProfileItem])
 def list_active_voices(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     """
     List teacher voice profiles that are ACTIVE and have confirmed consent.
-    Available to students and teachers.
+    Available to students and teachers. Reference audio is never exposed here.
     """
     profiles = (
         db.query(VoiceProfile)

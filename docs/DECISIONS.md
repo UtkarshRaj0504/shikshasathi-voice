@@ -129,3 +129,35 @@
   - **Retry-on-500 safety net**: if Gnani still answers a non-`auto` request with HTTP 500, the request is retried **once** with `language: "auto"` (the documented recommendation for mixed content) so the student still gets audio in the language of the answer's script. The retry does not mutate the first payload.
 * **Regression tests** (`tests/backend/test_tts.py`, all mocked): the documented language-code table (incl. `hi-IN`→`hi-IN`, `hi`→`hi-IN`, `as-IN`→`auto`), the exact `hi-IN` code reaching Gnani, the 500→`auto` retry, and `/tts/speak` forwarding `hi-IN` verbatim.
 
+## 7. Teacher Voice Cloning (Gnani Vachana) — decisions
+
+Verified against https://docs.gnani.ai (Voice Cloning pages) before coding. No values below were guessed.
+
+### 7a. Two-step contract: embeddings, then cloned inference
+* **Create voice** — `POST https://api.vachana.ai/api/v1/tts/voice-clone/embeddings`, header `X-API-Key-ID`, `multipart/form-data` field `audio_file` (WAV or MP3, ideally 5–30 s of clear speech). Response:
+  `{"success": true, "data": {"voice_clone_embedding": {"embedding": "<base64>", "shape": [1, 768], "dtype": "torch.bfloat16"}}}`.
+  The **cloned voice is referenced by the returned speaker embedding**, not by an opaque voice id — so we serialize that object as JSON and store it in `VoiceProfile.gnani_voice_id`.
+* **Synthesize with the cloned voice** — a **REST (non-streaming)** call exists and is preferred: `POST https://api.vachana.ai/api/v1/tts/inference` with model `vachana-vc-v1` and a `speaker_embedding` object. It returns binary audio, so no SSE assembly is needed. (SSE/streaming and realtime variants exist but are unnecessary here.)
+
+### 7b. No documented provider "delete voice" endpoint
+* **Decision**: `VoiceCloneService.delete_voice()` is a **best-effort no-op**. There is no documented Gnani endpoint to delete a stored voice, and the embedding is the only copy we hold. Revoke/delete therefore: (a) mark consent revoked, (b) set `status="revoked"` / delete the profile row, and (c) drop our local reference. If Gnani later documents a delete endpoint, only `GnaniVoiceCloneService.delete_voice()` needs to change.
+
+### 7c. Reference audio is never stored or exposed
+* **Decision**: the reference sample is held **in memory only** for the duration of the request and discarded immediately after the provider voice is created. It is never written to disk (`sample_audio_path` stays null), never returned by any student endpoint, and never logged. This satisfies "answers in the teacher's voice" without retaining biometric audio.
+
+### 7d. Consent is the only path to `active`
+* **Decision**: a profile is created `active` **only** in the `POST /voice-profiles` handler and only with `consent_confirmed=true`; a `VoiceConsent` audit row (version, full text shown, timestamp, IP, user-agent) is written in the same request. The former startup shortcut that seeded an `active` + `consent_confirmed=True` profile was removed. Provider failure yields `status="failed"` (never selectable); revoke/delete set `consent_confirmed=False`.
+
+### 7e. Rate limiting & profile cap are in-process
+* **Decision**: creation and preview are limited per teacher with an **in-memory** sliding window (`VOICE_CLONE_CREATE_RATE_LIMIT`, `VOICE_CLONE_PREVIEW_RATE_LIMIT`, `VOICE_CLONE_RATE_WINDOW_SECONDS`), and each teacher is capped at `VOICE_CLONE_MAX_PROFILES` (default 3) non-revoked profiles. In-memory is sufficient for a single-process dev/small deployment; a multi-worker deployment should move this to Redis. This is recorded here as a known limitation, not a bug.
+
+### 7f. Delete keeps the consent audit trail
+* **Decision**: deleting a profile **detaches** its `VoiceConsent` rows (sets `voice_profile_id = NULL`) instead of cascading them away, so the audit trail ("this teacher once consented, and here is the exact text and timestamp") survives deletion. Revoke keeps the link and only sets `revoked_at`.
+
+### 7g. Cloned synthesis goes through TTS, not a second HTTP client
+* **Decision**: `GnaniVoiceCloneService.synthesize_with_cloned_voice` delegates to the existing `GnaniTimbreTTSService` (model `vachana-vc-v1`, `speaker_embedding`), so language normalization, error mapping (401/403/402/429/timeout) and audio extraction are shared with standard TTS. `/tts/speak` keeps its existing behaviour: cloned playback is labelled `"AI-generated voice, authorized by the teacher."`, and any cloned failure falls back to the **default voice** with `fallback=true` and a visible notice — never a beep.
+
+### 7h. `VOICE_CLONE_PROVIDER` defaults to `mock`
+* **Decision**: unlike `STT_PROVIDER`/`TTS_PROVIDER` (which default to `auto`), `VOICE_CLONE_PROVIDER` defaults to **`mock`**. Cloning stores a biometric speaker embedding and is account-gated on Gnani's side, so the real provider is **opt-in**: set `VOICE_CLONE_PROVIDER=auto` (real when `GNANI_API_KEY` is set) or `=gnani`. Tests and `APP_ENV=test` always force mock regardless. This keeps the mock path working end to end by default while making the real API a deliberate choice.
+
+

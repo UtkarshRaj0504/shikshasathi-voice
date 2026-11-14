@@ -21,7 +21,6 @@ from app.core.config import settings
 from app.core.database import Base, SessionLocal, get_engine
 from app.core.security import hash_password
 from app.models.user import User
-from app.models.voice_profile import VoiceProfile
 from app.db.seed import TEST_ACCOUNTS
 
 app = FastAPI(
@@ -60,6 +59,14 @@ def on_startup():
     try:
         with engine.connect() as conn:
             conn.execute(text("ALTER TABLE document_chunks ADD COLUMN embedding_model VARCHAR(255)"))
+            conn.commit()
+    except Exception:
+        pass
+
+    # Add languages to voice_profiles (existing dev databases created before this column)
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("ALTER TABLE voice_profiles ADD COLUMN languages VARCHAR(200)"))
             conn.commit()
     except Exception:
         pass
@@ -126,21 +133,6 @@ def on_startup():
                 db.commit()
                 db.refresh(user)
                 print(f"✓ Seeded test account: {account['email']} / {account['password']}")
-
-        # Seed an active teacher voice profile with confirmed consent
-        teacher = db.query(User).filter(User.email == "teacher@shikshasathi.local").first()
-        if teacher and not db.query(VoiceProfile).filter(VoiceProfile.teacher_id == teacher.id).first():
-            profile = VoiceProfile(
-                teacher_id=teacher.id,
-                voice_name="Test Teacher Voice",
-                gnani_voice_id="test_voice_v1",
-                status="active",
-                consent_confirmed=True,
-                consent_text="I authorize ShikshaSaathi to use my cloned voice for tutoring.",
-            )
-            db.add(profile)
-            db.commit()
-            print(f"✓ Seeded voice profile for teacher")
 
     except Exception as e:
         print(f"Startup seeding error: {e}")

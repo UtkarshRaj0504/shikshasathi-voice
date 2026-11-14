@@ -49,7 +49,7 @@ class Settings(BaseSettings):
     # Gnani API keys & AI providers
     STT_PROVIDER: str = "auto"
     TTS_PROVIDER: str = "auto"
-    VOICE_CLONE_PROVIDER: str = "auto"
+    VOICE_CLONE_PROVIDER: str = "mock"  # mock (default) | gnani | auto (gnani when GNANI_API_KEY is set)
     GNANI_API_KEY: str = ""
     GNANI_PRISMA_ENDPOINT: str = "https://api.vachana.ai/stt/v3"
     GNANI_EVON_ENDPOINT: str = ""
@@ -57,6 +57,12 @@ class Settings(BaseSettings):
     GNANI_VOICE_CLONE_ENDPOINT: str = "https://api.vachana.ai/api/v1/tts/voice-clone/embeddings"
     GNANI_TTS_MODEL: str = "timbre-v3.0"
     GNANI_TTS_VOICE: str = "Lakshmi"
+
+    # Voice cloning limits (teacher voice profiles)
+    VOICE_CLONE_MAX_PROFILES: int = 3  # max profiles a teacher may keep
+    VOICE_CLONE_CREATE_RATE_LIMIT: int = 5  # create calls allowed per window
+    VOICE_CLONE_PREVIEW_RATE_LIMIT: int = 10  # preview calls allowed per window
+    VOICE_CLONE_RATE_WINDOW_SECONDS: int = 600  # rate-limit window (seconds)
 
     # Embedding & RAG
     EMBEDDING_MODEL: str = "intfloat/multilingual-e5-small"
