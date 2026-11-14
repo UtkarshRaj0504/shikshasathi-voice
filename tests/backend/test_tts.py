@@ -271,3 +271,101 @@ def test_gnani_tts_endpoint_override_via_env():
     service = GnaniTimbreTTSService(endpoint="https://example.test/custom/tts", api_key="test-key")
     assert service.endpoint == "https://example.test/custom/tts"
 
+
+# ---------------------------------------------------------------------------
+# BUG 4b regression tests: non-English audio failed with a generic HTTP 500
+# (the UI sends BCP-47 codes such as hi-IN, which were lower-cased to the
+#  undocumented "hi-in" before being sent to Gnani).
+# ---------------------------------------------------------------------------
+
+def _gnani_ok_response(dummy_wav: bytes) -> MagicMock:
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.headers = {"content-type": "audio/wav"}
+    mock_resp.content = dummy_wav
+    return mock_resp
+
+
+def test_tts_language_codes_match_documented_gnani_values():
+    """Language codes must be the documented Gnani values (region upper-case)."""
+    service = GnaniTimbreTTSService(api_key="test-key")
+
+    # BCP-47 codes from the answer-language selector keep their casing.
+    assert service._normalize_language("hi-IN") == "hi-IN"
+    assert service._normalize_language("kn-IN") == "kn-IN"
+    assert service._normalize_language("ta-IN") == "ta-IN"
+    assert service._normalize_language("en-IN") == "en-IN"
+    # Short codes are expanded to the documented form.
+    assert service._normalize_language("hi") == "hi-IN"
+    assert service._normalize_language("kn") == "kn-IN"
+    assert service._normalize_language("en") == "en-IN"
+    # Auto-detect variants.
+    assert service._normalize_language("indic-auto") == "auto"
+    assert service._normalize_language("auto") == "auto"
+    # Code-mixed Hindi/English.
+    assert service._normalize_language("hi-en") == "hi-en"
+    # Assamese is not a Gnani TTS language -> script auto-detection, never an invalid code.
+    assert service._normalize_language("as-IN") == "auto"
+    assert service._normalize_language("") == "auto"
+
+
+def test_gnani_tts_sends_documented_bcp47_language():
+    """BUG 4b: 'hi-IN' from the UI must reach Gnani as 'hi-IN', not 'hi-in'."""
+    dummy_wav = b"RIFF" + b"\x00" * 36 + b"WAVEfmt " + b"\x00" * 20 + b"data" + b"\x00" * 100
+    service = GnaniTimbreTTSService(
+        endpoint="https://api.vachana.ai/api/v1/tts/inference",
+        api_key="test-gnani-key",
+    )
+
+    with patch("httpx.Client.post", return_value=_gnani_ok_response(dummy_wav)) as mock_post:
+        service.synthesize_speech("नमस्ते, आप कैसे हैं?", language="hi-IN")
+
+    assert mock_post.call_args.kwargs["json"]["language"] == "hi-IN"
+
+
+def test_gnani_tts_retries_with_auto_on_provider_500():
+    """A generic provider 500 is retried once with script auto-detection."""
+    dummy_wav = b"RIFF" + b"\x00" * 36 + b"WAVEfmt " + b"\x00" * 20 + b"data" + b"\x00" * 100
+    service = GnaniTimbreTTSService(
+        endpoint="https://api.vachana.ai/api/v1/tts/inference",
+        api_key="test-gnani-key",
+    )
+
+    failing = MagicMock()
+    failing.status_code = 500
+    failing.text = (
+        '{"success":false,"message":"We are facing technical difficulties. '
+        'Please try again later.","status_code":500}'
+    )
+
+    with patch("httpx.Client.post", side_effect=[failing, _gnani_ok_response(dummy_wav)]) as mock_post:
+        result = service.synthesize_speech("ದ್ಯುತಿಸಂಶ್ಲೇಷಣೆ ಎಂದರೇನು?", language="kn-IN")
+
+    assert result == dummy_wav
+    assert mock_post.call_count == 2
+    assert mock_post.call_args_list[0].kwargs["json"]["language"] == "kn-IN"
+    assert mock_post.call_args_list[1].kwargs["json"]["language"] == "auto"
+
+
+def test_speak_endpoint_forwards_non_english_language(client):
+    """The endpoint must hand the non-English language through to Gnani verbatim."""
+    dummy_wav = b"RIFF" + b"\x00" * 36 + b"WAVEfmt " + b"\x00" * 20 + b"data" + b"\x00" * 100
+    service = GnaniTimbreTTSService(
+        endpoint="https://api.vachana.ai/api/v1/tts/inference",
+        api_key="test-gnani-key",
+    )
+
+    with patch("app.api.tts.get_tts_service", return_value=service), patch(
+        "httpx.Client.post", return_value=_gnani_ok_response(dummy_wav)
+    ) as mock_post:
+        res = client.post(
+            "/tts/speak",
+            headers={"Authorization": f"Bearer {_student_token(client)}"},
+            json={"text": "नमस्ते छात्र", "language": "hi-IN"},
+        )
+
+    assert res.status_code == 200
+    payload = mock_post.call_args.kwargs["json"]
+    assert payload["language"] == "hi-IN"
+    assert payload["model"] == "timbre-v3.0"
+

@@ -228,7 +228,15 @@ class GnaniTimbreTTSService(TTSService):
     MODEL_STANDARD = DEFAULT_TTS_MODEL
     MODEL_VOICE_CLONE = CLONE_TTS_MODEL
 
-    LANGUAGE_MAP = {
+    # Documented language codes accepted by Gnani TTS (timbre-v2.5 / timbre-v3.0).
+    # https://docs.gnani.ai/api/TTS/tts-inference — note the upper-case region.
+    SUPPORTED_LANGUAGES = frozenset({
+        "auto", "hi-IN", "en-IN", "hi-en", "ta-IN", "te-IN",
+        "kn-IN", "ml-IN", "mr-IN", "pa-IN", "bn-IN", "gu-IN",
+    })
+
+    # Student-facing short codes -> documented Gnani codes.
+    LANGUAGE_ALIASES = {
         "en": "en-IN",
         "hi": "hi-IN",
         "kn": "kn-IN",
@@ -241,6 +249,10 @@ class GnaniTimbreTTSService(TTSService):
         "ml": "ml-IN",
         "auto": "auto",
         "indic-auto": "auto",
+        "unknown": "auto",
+        "": "auto",
+        # Code-mixed Hindi–English is documented with a lower-case region.
+        "hi-en": "hi-en",
     }
 
     def __init__(
@@ -261,12 +273,27 @@ class GnaniTimbreTTSService(TTSService):
         return False
 
     def _normalize_language(self, lang: str) -> str:
-        clean = (lang or "en").strip().lower()
-        if clean in self.LANGUAGE_MAP:
-            return self.LANGUAGE_MAP[clean]
+        """Map a student-facing language code to a documented Gnani TTS code.
+
+        BCP-47 region casing is preserved (``hi-IN`` stays ``hi-IN`` — lowercasing
+        it produced the undocumented ``hi-in``, which Gnani rejects with a generic
+        HTTP 500), short codes are expanded (``hi`` -> ``hi-IN``), and anything
+        Gnani cannot speak falls back to ``auto`` (script-based detection) so audio
+        is still produced.
+        """
+        clean = (lang or "").strip()
+        lowered = clean.lower()
+        if lowered in self.LANGUAGE_ALIASES:
+            return self.LANGUAGE_ALIASES[lowered]
         if "-" in clean:
-            return clean
-        return "en-IN"
+            parts = clean.split("-")
+            normalized = "-".join(
+                [parts[0].lower()]
+                + [p.upper() if len(p) == 2 and p.isalpha() else p.lower() for p in parts[1:]]
+            )
+            if normalized in self.SUPPORTED_LANGUAGES:
+                return normalized
+        return "auto"
 
     def synthesize_speech(
         self,
@@ -317,13 +344,22 @@ class GnaniTimbreTTSService(TTSService):
                 "audio_config": audio_config,
             }
 
-        try:
-            with httpx.Client(timeout=20.0) as client:
-                res = client.post(self.endpoint, headers=headers, json=payload)
-        except httpx.TimeoutException:
-            raise TTSError("Gnani TTS service timed out. Please try again.", status_code=504, error_code="TTS_TIMEOUT")
-        except httpx.RequestError:
-            raise TTSError("Network error connecting to Gnani TTS service.", status_code=502, error_code="TTS_NETWORK")
+        def _post(req_payload: dict) -> httpx.Response:
+            try:
+                with httpx.Client(timeout=20.0) as client:
+                    return client.post(self.endpoint, headers=headers, json=req_payload)
+            except httpx.TimeoutException:
+                raise TTSError("Gnani TTS service timed out. Please try again.", status_code=504, error_code="TTS_TIMEOUT")
+            except httpx.RequestError:
+                raise TTSError("Network error connecting to Gnani TTS service.", status_code=502, error_code="TTS_NETWORK")
+
+        res = _post(payload)
+        if res.status_code == 500 and lang_code != "auto":
+            # Gnani returns a generic HTTP 500 ("We are facing technical difficulties")
+            # when it cannot process the requested language for this text. Retry once
+            # with script-based auto-detection so non-English audio is still produced.
+            logger.warning("Gnani TTS returned HTTP 500 for language %s; retrying with 'auto'.", lang_code)
+            res = _post({**payload, "language": "auto"})
 
         if res.status_code in (401, 403):
             raise TTSError(

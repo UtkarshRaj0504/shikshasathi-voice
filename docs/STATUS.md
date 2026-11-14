@@ -7,11 +7,12 @@ All bugs are fixed, tested (mocked, no real network calls) and committed.
 | 1 — RAG says "not covered" for covered questions | Done | `2534949` |
 | 2 — English speech transcribed as Hindi | Done | `aa5b1c2` |
 | 3 — `TTS_NOT_CONFIGURED` teacher audio | Done | `ed662dc` |
-| 4 — Non-English questions always refused | Done | (this commit) |
+| 4 — Non-English questions always refused | Done | `f2fa86d` |
+| 5 — Non-English output audio failed (TTS HTTP 500) | Done | (this commit) |
 
 ## Test results (last run)
 
-- Backend: `python -m pytest tests/backend -q` → **105 passed**.
+- Backend: `python -m pytest tests/backend -q` → **109 passed**.
 - Frontend: `npm run build` → exit 0 (only the pre-existing pdfjs `eval` and chunk-size warnings).
 - Frontend unit tests: `npx vitest run` → **7 passed**.
 
@@ -66,6 +67,18 @@ e5 prefixes (`query: ` / `passage: `) confirmed; the prompt carries the question
 the requested answer language (instructions stay English); `RAG_DEBUG` returns retrieved chunk
 ids and scores. Debug tool: `python backend/scripts/debug_retrieval.py "<question>"`.
 
+## BUG 5 — Non-English output audio failed (TTS HTTP 500)
+
+**Root cause**: the answer-language selector submits BCP-47 codes (`hi-IN`, `kn-IN`, …), but
+`GnaniTimbreTTSService._normalize_language` lower-cased them and sent the undocumented `hi-in`
+to Gnani, which replies with a generic HTTP 500 ("We are facing technical difficulties").
+English (`en` → `en-IN`) worked, which is why only non-English failed.
+
+**Fix**: normalize to documented Gnani codes (region casing preserved: `hi-IN` stays `hi-IN`;
+short codes expanded: `hi` → `hi-IN`), fall back to script auto-detection (`auto`) for codes
+Gnani cannot speak (e.g. Assamese), and retry once with `auto` if Gnani still returns HTTP 500
+— so audio is produced in the language of the answer's script.
+
 ## Manual verification
 
 See `docs/MANUAL_TEST_CHECKLIST.md` for step-by-step checks.
@@ -79,4 +92,4 @@ See `docs/MANUAL_TEST_CHECKLIST.md` for step-by-step checks.
 
 ## Remaining work
 
-None — all four bugs are complete.
+None — all five bugs are complete.
