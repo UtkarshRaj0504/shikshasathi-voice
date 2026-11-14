@@ -1,6 +1,11 @@
 """
 Embedding service using sentence-transformers (multilingual-e5-small, dim 384)
 with query and passage prefixes.
+
+The active embedding dimension is fixed at ``EMBEDDING_DIMENSION`` (384). Chunks
+stored with a different dimension (for example the legacy 1536-dim placeholder
+model) cannot be compared against a query vector and must be re-embedded with the
+re-embed script (``backend/scripts/reembed_chunks.py``).
 """
 
 import abc
@@ -13,6 +18,8 @@ try:
     from sentence_transformers import SentenceTransformer
 except ImportError:
     SentenceTransformer = None
+
+EMBEDDING_DIMENSION = 384
 
 
 class BaseEmbeddingService(abc.ABC):
@@ -36,6 +43,9 @@ class BaseEmbeddingService(abc.ABC):
 class SentenceTransformerEmbeddingService(BaseEmbeddingService):
     """Real multilingual embedding service using sentence-transformers."""
 
+    #: Dimension of every vector produced by this service.
+    dimension = EMBEDDING_DIMENSION
+
     def __init__(self, model_name: str = "intfloat/multilingual-e5-small"):
         self.model_name = model_name
         self._model = None
@@ -53,11 +63,33 @@ class SentenceTransformerEmbeddingService(BaseEmbeddingService):
                     self._model = None
         return self._model
 
+    @property
+    def active_model_name(self) -> str:
+        """Identifier stored alongside chunks so stale embeddings can be detected.
+
+        Returns the real model id when the sentence-transformers model is loaded,
+        otherwise the deterministic in-process fallback used in tests/offline mode.
+        """
+        return self.model_name if self.model is not None else "mock-384"
+
+    @property
+    def is_real_model(self) -> bool:
+        """True when a real sentence-transformers model is loaded (not the mock fallback)."""
+        return self.model is not None
+
     def _mock_vector(self, text: str) -> list[float]:
-        # Use first word as key for stable mock matching between query and passage in tests
-        parts = text.strip().lower().split()
-        first_word = parts[0] if parts else "test"
-        hash_bytes = hashlib.sha256(first_word.encode("utf-8")).digest()
+        """Generate stable deterministic mock embedding for testing.
+        Uses content hash (not just first word) so similar content gets similar embeddings.
+        """
+        # For mock: use all meaningful words to generate vector
+        # This ensures "photosynthesis question" and "photosynthesis answer" get similar embeddings
+        words = text.strip().lower().split()
+        # Take up to 5 meaningful words (skip common stop words)
+        stop_words = {"what", "is", "the", "a", "an", "how", "why", "does", "do", "can", "explain"}
+        meaningful_words = [w for w in words if w not in stop_words][:5]
+        key_text = " ".join(meaningful_words) if meaningful_words else text[:20]
+
+        hash_bytes = hashlib.sha256(key_text.encode("utf-8")).digest()
         vector = []
         for i in range(384):
             byte_val = hash_bytes[i % len(hash_bytes)]

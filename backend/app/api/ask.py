@@ -3,6 +3,7 @@ RAG Question Answering API endpoint (/ask).
 """
 
 import json
+import logging
 import re
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
@@ -22,6 +23,8 @@ from app.services.llm_service import (
     GeminiTimeoutError,
 )
 from app.core.config import settings
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="", tags=["ask"])
 
@@ -101,6 +104,7 @@ class AskResponse(BaseModel):
     answer: str
     sources: list[SourceItem]
     grounded: bool
+    debug: dict | None = None  # Added for RAG_DEBUG mode
 
 
 @router.post("/ask", response_model=AskResponse)
@@ -146,44 +150,105 @@ def ask_question(
 
     import numpy as np
 
+    def _as_vector(value):
+        """Coerce a stored embedding (list, JSON string, or pgvector array) to a 1-D float array."""
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except Exception:
+                return None
+        if value is None:
+            return None
+        try:
+            return np.asarray(value, dtype=float)
+        except (TypeError, ValueError):
+            return None
+
+    query_dim = len(query_emb)
+
     def cosine_sim(a, b):
-        if isinstance(a, str):
-            try:
-                a = json.loads(a)
-            except Exception:
-                return 0.0
-        if isinstance(b, str):
-            try:
-                b = json.loads(b)
-            except Exception:
-                return 0.0
-        a_arr = np.array(a, dtype=float)
-        b_arr = np.array(b, dtype=float)
-        norm_a = np.linalg.norm(a_arr)
-        norm_b = np.linalg.norm(b_arr)
-        if norm_a == 0 or norm_b == 0:
+        a_arr = _as_vector(a)
+        b_arr = _as_vector(b)
+        if a_arr is None or b_arr is None:
+            return 0.0
+        if a_arr.ndim != 1 or b_arr.ndim != 1 or a_arr.size == 0 or a_arr.size != b_arr.size:
+            # Dimension mismatch: the chunk was embedded with a different model.
+            return 0.0
+        norm_a = float(np.linalg.norm(a_arr))
+        norm_b = float(np.linalg.norm(b_arr))
+        if norm_a == 0.0 or norm_b == 0.0:
             return 0.0
         return float(np.dot(a_arr, b_arr) / (norm_a * norm_b))
 
     scored = []
+    dimension_mismatch = 0
     for chunk, doc in rows:
-        v_sim = cosine_sim(chunk.embedding, query_emb)
-        l_sim = compute_lexical_similarity(body.question, chunk.content)
-        # Hybrid relevance: highest of vector similarity and keyword overlap
+        content = chunk.content or ""
+        if not content.strip():
+            continue
+        chunk_vec = _as_vector(chunk.embedding)
+        if chunk_vec is None or chunk_vec.ndim != 1 or chunk_vec.size != query_dim:
+            # Stale embedding (embedded with an older model / different dimension).
+            # Cannot be compared with the query vector: re-embed before it can match.
+            dimension_mismatch += 1
+            continue
+        v_sim = cosine_sim(chunk_vec, query_emb)
+        l_sim = compute_lexical_similarity(body.question, content)
+        # Hybrid relevance: best of semantic similarity and keyword overlap.
         relevance = max(v_sim, l_sim)
         # Boost chunks matching the student's active reader page
         if body.current_page is not None and getattr(chunk, "page_number", None) == body.current_page:
             relevance += 0.2
-        scored.append((relevance, chunk, doc))
+        scored.append({
+            "relevance": relevance,
+            "v_sim": v_sim,
+            "l_sim": l_sim,
+            "chunk": chunk,
+            "doc": doc,
+        })
 
-    scored.sort(key=lambda x: x[0], reverse=True)
-    matched_rows = [(item[1], item[2]) for item in scored[:4] if item[0] >= settings.SIMILARITY_THRESHOLD]
+    scored.sort(key=lambda item: item["relevance"], reverse=True)
+
+    matched_rows = [
+        (item["chunk"], item["doc"])
+        for item in scored[:4]
+        if item["relevance"] >= settings.SIMILARITY_THRESHOLD
+    ]
+
+    # Debug detail is only returned (and logged) when RAG_DEBUG is enabled.
+    debug_info = None
+    if settings.RAG_DEBUG:
+        debug_info = {
+            "query": body.question[:100],
+            "answer_language": body.answer_language,
+            "embedding_model": embedding_service.active_model_name,
+            "query_dimension": query_dim,
+            "threshold": settings.SIMILARITY_THRESHOLD,
+            "candidate_count": len(scored),
+            "dimension_mismatch_chunks": dimension_mismatch,
+            "matched_chunk_ids": [item["chunk"].id for item in scored[:4] if item["relevance"] >= settings.SIMILARITY_THRESHOLD],
+            "scored_chunks": [
+                {
+                    "chunk_id": item["chunk"].id,
+                    "document_id": item["doc"].id,
+                    "doc": item["doc"].filename,
+                    "page": getattr(item["chunk"], "page_number", None),
+                    "score": round(item["relevance"], 4),
+                    "vector_score": round(item["v_sim"], 4),
+                    "keyword_score": round(item["l_sim"], 4),
+                    "content_preview": (item["chunk"].content or "")[:80],
+                }
+                for item in scored[:10]
+            ],
+        }
+        logger.info("RAG debug retrieval: %s", debug_info)
 
     if not matched_rows:
         return AskResponse(
             answer="This isn't in the uploaded material.",
             sources=[],
-            grounded=False
+            grounded=False,
+            debug=debug_info
         )
 
     context_texts = []
@@ -258,5 +323,6 @@ def ask_question(
     return AskResponse(
         answer=answer,
         sources=sources,
-        grounded=True
+        grounded=True,
+        debug=debug_info
     )

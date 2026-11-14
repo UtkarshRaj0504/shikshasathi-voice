@@ -6,7 +6,7 @@ Compatible with both PostgreSQL (pgvector) and SQLite (tests).
 import json
 from datetime import datetime
 from pgvector.sqlalchemy import Vector as PGVector
-from sqlalchemy import DateTime, ForeignKey, Integer, Text, TypeDecorator, func
+from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, TypeDecorator, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
@@ -47,6 +47,9 @@ class DocumentChunk(Base):
     page_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
     content: Mapped[str] = mapped_column(Text, nullable=False)
     embedding: Mapped[list[float]] = mapped_column(FlexibleVector, nullable=False)
+    # Identifier of the embedding model used when this chunk was indexed.
+    # Used to detect stale chunks embedded with an older model / dimension.
+    embedding_model: Mapped[str | None] = mapped_column(String(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

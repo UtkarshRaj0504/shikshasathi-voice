@@ -17,9 +17,12 @@ interface MessageTurn {
   pageNumber?: number | null;
   audioBase64?: string | null;
   isCloned?: boolean;
+  isMock?: boolean;
   fallback?: boolean;
   voiceNotice?: string | null;
   voiceLabel?: string | null;
+  audioError?: string | null;
+  debug?: any;
   timestamp: string;
 }
 
@@ -122,10 +125,13 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ onLogout }) 
   const [conversation, setConversation] = useState<MessageTurn[]>([]);
   const [latestAudio, setLatestAudio] = useState<{
     base64: string | null;
+    contentType?: string;
     isCloned: boolean;
+    isMock?: boolean;
     fallback: boolean;
     notice: string | null;
     label: string | null;
+    error?: string | null;
   } | null>(null);
 
   // Audio refs
@@ -155,14 +161,16 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ onLogout }) 
       const [subjList, voiceList, prefs] = await Promise.all([
         api.getSubjects(),
         api.getVoices().catch(() => []),
-        api.getPreferences().catch(() => ({ voice_profile_id: null, question_language: "indic-auto", answer_language: "en" })),
+        api.getPreferences().catch(() => ({ voice_profile_id: null, question_language: "indic-auto", answer_language: "en", level: "intermediate" })),
       ]);
 
       setSubjects(subjList || []);
       setVoices(voiceList || []);
       if (prefs) {
         setSelectedVoiceId(prefs.voice_profile_id || null);
+        // Load question_language (for STT) - defaults to indic-auto
         if (prefs.question_language) setQuestionLanguage(prefs.question_language);
+        // Load answer_language (for TTS and LLM)
         if (prefs.answer_language) setAnswerLanguage(prefs.answer_language);
       }
     } catch (err: any) {
@@ -383,6 +391,7 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ onLogout }) 
     let askAnswer = "";
     let askSources: any[] = [];
     let isGrounded = false;
+    let askDebug: any = null;
 
     try {
       const res = await api.askQuestion(
@@ -397,6 +406,7 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ onLogout }) 
       askAnswer = res.answer;
       askSources = res.sources || [];
       isGrounded = res.grounded;
+      askDebug = res.debug || null;
     } catch (err: any) {
       console.error("Ask query error:", err);
       setError(err.message || "Failed to generate answer from study materials.");
@@ -410,28 +420,43 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ onLogout }) 
     setTtsLoading(true);
     let audioB64: string | null = null;
     let isCloned = false;
+    let isMock = false;
     let fallback = false;
     let notice: string | null = null;
     let label: string | null = null;
+    let ttsError: string | null = null;
 
     try {
       const ttsRes = await api.speakText(askAnswer, selectedVoiceId, answerLanguage);
       audioB64 = ttsRes.audio_base64;
       isCloned = ttsRes.is_cloned;
+      isMock = ttsRes.is_mock;
       fallback = ttsRes.fallback;
       notice = ttsRes.notice;
       label = ttsRes.label;
 
       setLatestAudio({
         base64: audioB64,
+        contentType: ttsRes.content_type || "audio/wav",
         isCloned,
+        isMock,
         fallback,
         notice,
         label,
+        error: null,
       });
     } catch (err: any) {
       console.warn("TTS speak generation warning:", err);
-      // TTS failure doesn't block showing the educational text answer
+      ttsError = err.message || "Failed to synthesize speech audio.";
+      setLatestAudio({
+        base64: null,
+        isCloned: false,
+        isMock: false,
+        fallback: false,
+        notice: null,
+        label: null,
+        error: ttsError,
+      });
     } finally {
       setTtsLoading(false);
     }
@@ -454,9 +479,12 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ onLogout }) 
       pageNumber: readerCurrentPage,
       audioBase64: audioB64,
       isCloned,
+      isMock,
       fallback,
       voiceNotice: notice,
       voiceLabel: label,
+      audioError: ttsError,
+      debug: askDebug,
       timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
     };
 
@@ -1035,11 +1063,14 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ onLogout }) 
           {latestAudio && (
             <AudioPlayer
               audioBase64={latestAudio.base64}
+              contentType={latestAudio.contentType || "audio/wav"}
               isCloned={latestAudio.isCloned}
+              isMock={latestAudio.isMock}
               fallback={latestAudio.fallback}
               notice={latestAudio.notice}
               label={latestAudio.label}
               loading={ttsLoading}
+              error={latestAudio.error}
               autoPlay={true}
               onRetry={() => {
                 const lastAns = conversation.filter((c) => c.role === "assistant").slice(-1)[0]?.answer;
@@ -1049,13 +1080,26 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ onLogout }) 
                     .then((res) => {
                       setLatestAudio({
                         base64: res.audio_base64,
+                        contentType: res.content_type || "audio/wav",
                         isCloned: res.is_cloned,
+                        isMock: res.is_mock,
                         fallback: res.fallback,
                         notice: res.notice,
                         label: res.label,
+                        error: null,
                       });
                     })
-                    .catch(() => {})
+                    .catch((err: any) => {
+                      setLatestAudio({
+                        base64: null,
+                        isCloned: false,
+                        isMock: false,
+                        fallback: false,
+                        notice: null,
+                        label: null,
+                        error: err.message || "Failed to generate speech audio.",
+                      });
+                    })
                     .finally(() => setTtsLoading(false));
                 }
               }}
@@ -1138,6 +1182,44 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ onLogout }) 
                               ))}
                             </ul>
                           </div>
+                        )}
+
+                        {/* Retrieval Debug (only returned when RAG_DEBUG is enabled) */}
+                        {msg.debug && (
+                          <details
+                            data-testid="rag-debug"
+                            style={{
+                              marginTop: "0.75rem",
+                              borderTop: "1px dashed #ced4da",
+                              paddingTop: "0.5rem",
+                              fontSize: "0.8rem",
+                              color: "#6c757d",
+                            }}
+                          >
+                            <summary style={{ cursor: "pointer", fontWeight: 600 }}>
+                              🐞 Debug (retrieval)
+                            </summary>
+                            <div style={{ marginTop: "0.5rem" }}>
+                              <div>
+                                Model: <code>{msg.debug.embedding_model}</code> • Query dim:{" "}
+                                <code>{msg.debug.query_dimension}</code> • Threshold:{" "}
+                                <code>{msg.debug.threshold}</code> • Candidates:{" "}
+                                <code>{msg.debug.candidate_count}</code> • Dim mismatch:{" "}
+                                <code>{msg.debug.dimension_mismatch_chunks}</code>
+                              </div>
+                              <ol style={{ margin: "0.5rem 0 0", paddingLeft: "1.2rem" }}>
+                                {(msg.debug.scored_chunks || []).map((c: any) => (
+                                  <li key={c.chunk_id}>
+                                    <code>#{c.chunk_id}</code> {c.doc}
+                                    {c.page ? ` (p${c.page})` : ""} — score{" "}
+                                    <strong>{c.score}</strong> (vec {c.vector_score}, kw{" "}
+                                    {c.keyword_score})
+                                    {c.content_preview ? `: "${c.content_preview}…"` : ""}
+                                  </li>
+                                ))}
+                              </ol>
+                            </div>
+                          </details>
                         )}
                       </div>
                     )}
