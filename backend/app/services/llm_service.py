@@ -12,6 +12,14 @@ from app.core.config import settings
 logger = logging.getLogger(__name__)
 
 
+#: Prompt template used to translate a student's question for retrieval.
+REWRITE_PROMPT_TEMPLATE = (
+    "Translate the following student question into {language}. "
+    "Return ONLY the translated question, with no explanation, quotes or extra text.\n\n"
+    "Question: {question}"
+)
+
+
 class LLMService(abc.ABC):
     """Abstract base class for LLM services."""
 
@@ -19,6 +27,15 @@ class LLMService(abc.ABC):
     def generate_answer(self, prompt: str, system_prompt: str = "") -> str:
         """Generate answer from prompt and system prompt."""
         pass
+
+    def rewrite_query(self, question: str, target_language: str = "English") -> str:
+        """Rewrite/translate a question into ``target_language`` for retrieval.
+
+        Used so a non-English question can be matched against (typically English)
+        study material. The default implementation returns the question unchanged;
+        real providers override it. Callers must treat this as best-effort.
+        """
+        return question
 
 
 class MockLLMService(LLMService):
@@ -61,6 +78,12 @@ class OpenAILLMService(LLMService):
             response.raise_for_status()
             data = response.json()
             return data["choices"][0]["message"]["content"]
+
+    def rewrite_query(self, question: str, target_language: str = "English") -> str:
+        prompt = REWRITE_PROMPT_TEMPLATE.format(language=target_language, question=question)
+        return self.generate_answer(
+            prompt, system_prompt="You are a precise translator. Output only the translation."
+        )
 
 
 class GeminiRateLimitError(RuntimeError):
@@ -204,6 +227,12 @@ class GeminiLLMService(LLMService):
             raise RuntimeError("Gemini API returned empty text in candidate content.")
 
         return text
+
+    def rewrite_query(self, question: str, target_language: str = "English") -> str:
+        prompt = REWRITE_PROMPT_TEMPLATE.format(language=target_language, question=question)
+        return self.generate_answer(
+            prompt, system_prompt="You are a precise translator. Output only the translation."
+        )
 
 
 # TODO: Gnani Evon LLM Implementation (Phase 6+)

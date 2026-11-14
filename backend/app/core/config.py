@@ -64,7 +64,7 @@ class Settings(BaseSettings):
     LLM_MODEL: str = "gemini-3.5-flash-lite"
     GEMINI_API_KEY: str = ""
     OPENAI_API_KEY: str = ""
-    SIMILARITY_THRESHOLD: float = 0.25  # Lowered from 0.3 for short queries
+    SIMILARITY_THRESHOLD: float = 0.10  # Lenient retrieval floor (cross-lingual scores are lower); never decides refusal alone
     RAG_DEBUG: bool = False  # Set to true to show debug info in retrieval
 
     model_config = {

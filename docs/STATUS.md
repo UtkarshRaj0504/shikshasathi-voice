@@ -1,16 +1,17 @@
 # Bug Fix Session — ShikshaSaathi Voice (final status)
 
-All three bugs are fixed, tested (mocked, no real network calls) and committed.
+All bugs are fixed, tested (mocked, no real network calls) and committed.
 
 | Bug | Status | Commit |
 |-----|--------|--------|
 | 1 — RAG says "not covered" for covered questions | Done | `2534949` |
 | 2 — English speech transcribed as Hindi | Done | `aa5b1c2` |
 | 3 — `TTS_NOT_CONFIGURED` teacher audio | Done | `ed662dc` |
+| 4 — Non-English questions always refused | Done | (this commit) |
 
 ## Test results (last run)
 
-- Backend: `python -m pytest tests/backend -q` → **100 passed**.
+- Backend: `python -m pytest tests/backend -q` → **105 passed**.
 - Frontend: `npm run build` → exit 0 (only the pre-existing pdfjs `eval` and chunk-size warnings).
 - Frontend unit tests: `npx vitest run` → **7 passed**.
 
@@ -48,6 +49,23 @@ problem.
 beep); cloned-voice failure falls back to the default voice with a visible notice; startup
 logs the active STT/TTS/LLM/Embedding/VoiceClone providers (mock vs real).
 
+## BUG 4 — Non-English questions always refused ("not covered")
+
+**Root cause (confirmed with `backend/scripts/debug_retrieval.py`)**: matching used cosine
+similarity between the *original* question and English chunks, and a fixed
+`SIMILARITY_THRESHOLD` alone decided refusal. A non-English question has no lexical overlap
+with English chunks and its cross-lingual score falls below the old floor, so it was always
+dropped and refused. Measured on the same notes (`jesc110-min.pdf`): English top score
+`1.0000` vs Hindi-only top score `0.1043`.
+
+**Fix**: non-English questions are rewritten into English by the LLM (`LLMService.rewrite_query`)
+and retrieved with **both** phrasings, merging the best score per chunk; the threshold is now
+a *lenient floor* (`0.10`) that never decides refusal alone (rank-based fallback keeps the
+best chunk); `grounded=false` is set **only** when the LLM replies with `NOT_IN_STUDY_MATERIAL`;
+e5 prefixes (`query: ` / `passage: `) confirmed; the prompt carries the question language and
+the requested answer language (instructions stay English); `RAG_DEBUG` returns retrieved chunk
+ids and scores. Debug tool: `python backend/scripts/debug_retrieval.py "<question>"`.
+
 ## Manual verification
 
 See `docs/MANUAL_TEST_CHECKLIST.md` for step-by-step checks.
@@ -61,4 +79,4 @@ See `docs/MANUAL_TEST_CHECKLIST.md` for step-by-step checks.
 
 ## Remaining work
 
-None — all three bugs are complete.
+None — all four bugs are complete.

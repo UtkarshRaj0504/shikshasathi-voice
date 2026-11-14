@@ -11,6 +11,7 @@ from app.models.document_chunk import DocumentChunk
 from app.models.chapter import Chapter
 from app.models.subject import Subject
 from app.services.embedding_service import EMBEDDING_DIMENSION, embedding_service
+from app.api.ask import NOT_IN_MATERIAL_MARKER
 
 
 def register_and_login(client, email, name, role):
@@ -268,6 +269,31 @@ class FakeEmbeddingService:
         return [self._vec(t) for t in texts]
 
 
+class FakeLLMService:
+    """Deterministic LLM stand-in (no network).
+
+    ``translation`` simulates translating a non-English question; ``answer`` is
+    what the model returns for a grounded question. Returning the refusal marker
+    simulates the model deciding the material does not contain the answer.
+    """
+
+    def __init__(self, answer: str = "Photosynthesis turns light energy into chemical energy.", translation: str | None = None):
+        self._answer = answer
+        self._translation = translation
+        self.rewrite_calls: list[str] = []
+        self.last_prompt: str | None = None
+        self.last_system_prompt: str | None = None
+
+    def rewrite_query(self, question: str, target_language: str = "English") -> str:
+        self.rewrite_calls.append(question)
+        return self._translation if self._translation is not None else question
+
+    def generate_answer(self, prompt: str, system_prompt: str = "") -> str:
+        self.last_prompt = prompt
+        self.last_system_prompt = system_prompt
+        return self._answer
+
+
 def _create_materials(db_session, filename, content, embedding, embedding_model="fake-test-model"):
     subject = Subject(name="Science", teacher_id=1)
     db_session.add(subject)
@@ -347,13 +373,18 @@ def test_ask_answered_from_notes(client, db_session):
 
 
 def test_ask_out_of_scope_question_refused(client, db_session):
-    """A genuinely out-of-scope question must be refused even when documents exist."""
+    """A genuinely out-of-scope question must be refused.
+
+    The refusal now comes from the LLM's marker (the similarity floor never
+    decides on its own), so the fake LLM returns the marker for this material.
+    """
     token = _student_and_token(client, "oop")
     fake = FakeEmbeddingService()
     content = "Photosynthesis is the process plants use to convert light energy into chemical energy."
     chapter, document, chunk = _create_materials(db_session, "biology.txt", content, fake.embed_passage(content))
 
-    with patch("app.api.ask.embedding_service", fake):
+    llm = FakeLLMService(answer=NOT_IN_MATERIAL_MARKER)
+    with patch("app.api.ask.embedding_service", fake), patch("app.api.ask.get_llm_service", return_value=llm):
         res = client.post(
             "/ask",
             json={"question": "Who won the cricket world cup?", "chapter_id": chapter.id, "answer_language": "en", "level": "intermediate"},
@@ -365,6 +396,129 @@ def test_ask_out_of_scope_question_refused(client, db_session):
     assert data["grounded"] is False
     assert data["sources"] == []
     assert "isn't in the uploaded material" in data["answer"]
+
+
+def test_ask_refusal_comes_from_llm_marker_not_the_threshold(client, db_session, monkeypatch):
+    """Even when chunks score below the floor, the chunk is still passed to the LLM."""
+    monkeypatch.setattr(settings, "RAG_DEBUG", True)
+    monkeypatch.setattr(settings, "SIMILARITY_THRESHOLD", 1.5)  # nothing can clear this floor
+    token = _student_and_token(client, "floor")
+    fake = FakeEmbeddingService()
+    content = "Photosynthesis is the process plants use to convert light energy into chemical energy."
+    chapter, document, chunk = _create_materials(db_session, "biology.txt", content, fake.embed_passage(content))
+
+    # An in-scope question that the LLM *does* answer must stay grounded even though
+    # its score is below the (deliberately impossible) floor.
+    llm = FakeLLMService(answer="Photosynthesis turns light energy into chemical energy.")
+    with patch("app.api.ask.embedding_service", fake), patch("app.api.ask.get_llm_service", return_value=llm):
+        res = client.post(
+            "/ask",
+            json={"question": "What is photosynthesis?", "chapter_id": chapter.id, "answer_language": "en", "level": "intermediate"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    data = res.json()
+    assert data["grounded"] is True
+    assert data["debug"]["below_threshold_fallback"] is True
+    assert data["debug"]["matched_chunk_ids"] == [chunk.id]
+
+
+def test_ask_hindi_question_retrieves_english_chunk(client, db_session, monkeypatch):
+    """A Hindi question must retrieve the correct English chunk via query rewriting."""
+    monkeypatch.setattr(settings, "RAG_DEBUG", True)
+    token = _student_and_token(client, "hindi")
+    fake = FakeEmbeddingService()
+    content = "Photosynthesis is the process plants use to convert light energy into chemical energy."
+    chapter, document, chunk = _create_materials(db_session, "biology.txt", content, fake.embed_passage(content))
+
+    hindi_question = "प्रकाश संश्लेषण क्या है?"
+    llm = FakeLLMService(translation="What is photosynthesis?")
+    with patch("app.api.ask.embedding_service", fake), patch("app.api.ask.get_llm_service", return_value=llm):
+        res = client.post(
+            "/ask",
+            json={"question": hindi_question, "chapter_id": chapter.id, "answer_language": "hi", "level": "intermediate"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert res.status_code == 200
+    data = res.json()
+    assert llm.rewrite_calls == [hindi_question]
+    assert data["grounded"] is True
+    assert any(s["document_name"] == "biology.txt" for s in data["sources"])
+    # Original + rewritten query were both used for retrieval.
+    assert data["debug"]["queries_used"] == [hindi_question, "What is photosynthesis?"]
+
+
+def test_ask_kannada_question_retrieves_english_chunk(client, db_session):
+    """A Kannada question must retrieve the correct English chunk via query rewriting."""
+    token = _student_and_token(client, "kannada")
+    fake = FakeEmbeddingService()
+    content = "Photosynthesis is the process plants use to convert light energy into chemical energy."
+    chapter, document, chunk = _create_materials(db_session, "biology.txt", content, fake.embed_passage(content))
+
+    kannada_question = "ದ್ಯುತಿಸಂಶ್ಲೇಷಣೆ ಎಂದರೇನು?"
+    llm = FakeLLMService(translation="What is photosynthesis?")
+    with patch("app.api.ask.embedding_service", fake), patch("app.api.ask.get_llm_service", return_value=llm):
+        res = client.post(
+            "/ask",
+            json={"question": kannada_question, "chapter_id": chapter.id, "answer_language": "kn", "level": "intermediate"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert res.status_code == 200
+    data = res.json()
+    assert llm.rewrite_calls == [kannada_question]
+    assert data["grounded"] is True
+    assert any(s["document_name"] == "biology.txt" for s in data["sources"])
+
+
+def test_ask_english_question_is_not_rewritten(client, db_session):
+    """An English question must not trigger a translation round-trip."""
+    token = _student_and_token(client, "no_rewrite")
+    fake = FakeEmbeddingService()
+    content = "Photosynthesis is the process plants use to convert light energy into chemical energy."
+    chapter, document, chunk = _create_materials(db_session, "biology.txt", content, fake.embed_passage(content))
+
+    llm = FakeLLMService(translation="SHOULD NOT BE USED")
+    with patch("app.api.ask.embedding_service", fake), patch("app.api.ask.get_llm_service", return_value=llm):
+        res = client.post(
+            "/ask",
+            json={"question": "What is photosynthesis?", "chapter_id": chapter.id, "answer_language": "en", "level": "intermediate"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert res.status_code == 200
+    assert llm.rewrite_calls == []
+    assert res.json()["grounded"] is True
+
+
+def test_ask_prompt_includes_question_and_answer_language(client, db_session):
+    """The (English) prompt must mention both the question language and the answer language."""
+    token = _student_and_token(client, "prompt")
+    fake = FakeEmbeddingService()
+    content = "Photosynthesis is the process plants use to convert light energy into chemical energy."
+    chapter, document, chunk = _create_materials(db_session, "biology.txt", content, fake.embed_passage(content))
+
+    llm = FakeLLMService()
+    with patch("app.api.ask.embedding_service", fake), patch("app.api.ask.get_llm_service", return_value=llm):
+        client.post(
+            "/ask",
+            json={
+                "question": "What is photosynthesis?",
+                "chapter_id": chapter.id,
+                "question_language": "hi",
+                "answer_language": "kn",
+                "level": "intermediate",
+            },
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert "Hindi" in llm.last_system_prompt
+    assert "Kannada" in llm.last_system_prompt
+    # Instructions stay in English and ask for the refusal marker.
+    assert NOT_IN_MATERIAL_MARKER in llm.last_system_prompt
+    assert NOT_IN_MATERIAL_MARKER in llm.last_prompt
+
 
 
 def test_ask_reembedded_document_becomes_retrievable(client, db_session):
