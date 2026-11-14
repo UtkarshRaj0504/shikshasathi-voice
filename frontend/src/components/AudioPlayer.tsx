@@ -4,6 +4,7 @@ interface AudioPlayerProps {
   audioBase64?: string | null;
   contentType?: string;
   isCloned?: boolean;
+  isMock?: boolean;
   fallback?: boolean;
   notice?: string | null;
   label?: string | null;
@@ -17,6 +18,7 @@ export const AudioPlayer: React.FC<AudioPlayerProps> = ({
   audioBase64,
   contentType = "audio/wav",
   isCloned = false,
+  isMock = false,
   fallback = false,
   notice,
   label,
@@ -228,6 +230,30 @@ export const AudioPlayer: React.FC<AudioPlayerProps> = ({
           }}
         >
           ℹ️ {notice || "Teacher voice unavailable; used default voice."}
+        </div>
+      )}
+
+      {/* Mock Audio Transparency Badge */}
+      {isMock && (
+        <div
+          data-testid="mock-audio-badge"
+          style={{
+            display: "inline-flex",
+            alignItems: "center",
+            gap: "0.4rem",
+            background: "#fff3cd",
+            color: "#664d03",
+            padding: "0.3rem 0.65rem",
+            borderRadius: "16px",
+            fontSize: "0.8rem",
+            fontWeight: 600,
+            marginBottom: "0.75rem",
+            marginRight: "0.5rem",
+            border: "1px solid #ffe69c",
+          }}
+        >
+          <span>🧪</span>
+          <span>mock audio (synthetic development tone)</span>
         </div>
       )}
 

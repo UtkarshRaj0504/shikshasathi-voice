@@ -13,7 +13,7 @@ from app.core.database import get_db
 from app.core.security import get_current_user
 from app.models.user import User
 from app.models.voice_profile import VoiceProfile
-from app.services.tts_service import get_tts_service
+from app.services.tts_service import TTSError, detect_audio_content_type, get_tts_service
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +31,7 @@ class SpeakResponse(BaseModel):
     content_type: str = "audio/wav"
     voice_used: str  # "cloned" | "default"
     is_cloned: bool
+    is_mock: bool = False
     fallback: bool
     notice: str | None = None
     label: str | None = None
@@ -47,6 +48,7 @@ def speak_text(
     Synthesize answer text into speech.
     - If a valid, active voice profile with confirmed consent is specified, uses cloned teacher voice.
     - If the cloned voice fails or profile is invalid, falls back to the default voice with a notice.
+    - Never silently falls back to a beep tone when real provider fails: returns explicit errors.
     - Cloned voice playback includes the explicit authorized disclosure label.
     """
     tts_service = get_tts_service()
@@ -86,12 +88,13 @@ def speak_text(
             is_cloned = True
             label = "AI-generated voice, authorized by the teacher."
         except Exception as e:
-            logger.warning(f"Cloned voice synthesis failed ({e}). Falling back to default voice.")
+            err_msg = e.message if isinstance(e, TTSError) else "cloned voice synthesis failed"
+            logger.warning("Cloned voice synthesis failed. Falling back to default voice.")
             fallback = True
-            notice = "Teacher voice unavailable; used default voice."
+            notice = f"Teacher voice unavailable ({err_msg}); used default voice."
 
     if audio_bytes is None:
-        # Default voice generation
+        # Default voice: never replace a real-provider failure with a mock beep.
         try:
             audio_bytes = tts_service.synthesize_speech(
                 text=body.text,
@@ -100,32 +103,40 @@ def speak_text(
             )
             voice_used = "default"
             is_cloned = False
-        except Exception as e:
-            logger.error(f"Default TTS synthesis failed: {e}")
+        except TTSError as err:
+            logger.error("Default TTS synthesis error: %s", err.error_code)
             raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Text-to-speech generation failed.",
+                status_code=err.status_code,
+                detail={"code": err.error_code, "message": err.message},
+            )
+        except Exception:
+            logger.error("Default TTS unexpected synthesis failed")
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail={"code": "TTS_FAILED", "message": "Text-to-speech generation failed."},
             )
 
-    # Return raw audio stream if client explicitly requested audio media type
+    content_type = detect_audio_content_type(audio_bytes)
+
     accept = request.headers.get("accept", "")
     if "audio/" in accept:
         return Response(
             content=audio_bytes,
-            media_type="audio/wav",
+            media_type=content_type,
             headers={
                 "X-Voice-Used": voice_used,
                 "X-Voice-Fallback": str(fallback).lower(),
+                "X-Voice-Mock": str(tts_service.is_mock).lower(),
             },
         )
 
-    # Otherwise return JSON with audio base64 and metadata
     audio_b64 = base64.b64encode(audio_bytes).decode("ascii")
     return SpeakResponse(
         audio_base64=audio_b64,
-        content_type="audio/wav",
+        content_type=content_type,
         voice_used=voice_used,
         is_cloned=is_cloned,
+        is_mock=tts_service.is_mock,
         fallback=fallback,
         notice=notice,
         label=label,

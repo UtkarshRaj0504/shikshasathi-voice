@@ -46,13 +46,17 @@ class Settings(BaseSettings):
     # Frontend
     VITE_API_BASE_URL: str = "http://localhost:8000"
 
-    # Gnani API keys & STT provider
-    STT_PROVIDER: str = "mock"
+    # Gnani API keys & AI providers
+    STT_PROVIDER: str = "auto"
+    TTS_PROVIDER: str = "auto"
+    VOICE_CLONE_PROVIDER: str = "auto"
     GNANI_API_KEY: str = ""
     GNANI_PRISMA_ENDPOINT: str = "https://api.vachana.ai/stt/v3"
     GNANI_EVON_ENDPOINT: str = ""
-    GNANI_TIMBRE_ENDPOINT: str = ""
-    GNANI_VOICE_CLONE_ENDPOINT: str = ""
+    GNANI_TIMBRE_ENDPOINT: str = "https://api.vachana.ai/api/v1/tts/inference"
+    GNANI_VOICE_CLONE_ENDPOINT: str = "https://api.vachana.ai/api/v1/tts/voice-clone/embeddings"
+    GNANI_TTS_MODEL: str = "timbre-v3.0"
+    GNANI_TTS_VOICE: str = "Lakshmi"
 
     # Embedding & RAG
     EMBEDDING_MODEL: str = "intfloat/multilingual-e5-small"
@@ -60,7 +64,8 @@ class Settings(BaseSettings):
     LLM_MODEL: str = "gemini-3.5-flash-lite"
     GEMINI_API_KEY: str = ""
     OPENAI_API_KEY: str = ""
-    SIMILARITY_THRESHOLD: float = 0.3
+    SIMILARITY_THRESHOLD: float = 0.25  # Lowered from 0.3 for short queries
+    RAG_DEBUG: bool = False  # Set to true to show debug info in retrieval
 
     model_config = {
         "env_file": [str(BACKEND_DIR / ".env"), str(REPO_ROOT / ".env"), ".env"],

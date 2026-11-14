@@ -51,14 +51,23 @@
 ## 6. BUG FIXES (2026-11-14)
 
 ### Bug 3: TTS Endpoint Configuration
-* **Issue**: "Gnani Timbre endpoint is not configured" error even though default was set.
-* **Root Cause**: Check at line 285 happened before endpoint was properly assigned in __init__.
+* **Issue**: Teacher audio failed with `TTS_NOT_CONFIGURED` ("Gnani Timbre endpoint is not configured") even though a default should exist.
+* **Root Cause**: `GNANI_TIMBRE_ENDPOINT` defaulted to an empty string, and the service treated the resulting endpoint check as the failure instead of the genuinely-missing API key — so a missing key surfaced as an "endpoint not configured" error.
+* **Verified against https://docs.gnani.ai/api/TTS/tts-inference** (no guessing):
+  - Endpoint: `POST https://api.vachana.ai/api/v1/tts/inference`.
+  - Headers: `X-API-Key-ID` (the API key) and `Content-Type: application/json`.
+  - Body fields: `text`, `voice`, `model`, `language`, `speed`, `audio_config`.
+  - Model/voice: `timbre-v3.0` with voice `Lakshmi` (a documented v3.0 voice); v3.0 voices speak all 10 supported languages.
+  - `audio_config`: `encoding=linear_pcm`, `container=wav`, `num_channels=1`, `sample_width=2`, `sample_rate=24000` (24000 is an officially supported rate).
+  - Output: a WAV file (`audio/wav`); `language` accepts `auto` and BCP-47 values such as `en-IN`, `hi-IN`, `kn-IN`.
 * **Fix**:
-  - Endpoint now defaults to https://api.vachana.ai/api/v1/tts/inference from settings or hardcoded
-  - Separate error for missing GNANI_API_KEY vs missing endpoint
-  - Startup logs which TTS provider is active (Mock or GnaniTimbreTTSService)
-  - Real provider errors never silently fall back to beep; explicit error in UI
-  - Cloned voice fallback to default voice with notice (not to mock)
+  - `GNANI_TIMBRE_ENDPOINT` now defaults to `https://api.vachana.ai/api/v1/tts/inference` in settings, and the service also hard-falls-back to that URL, so it is never "not configured". A custom override via env is still honoured.
+  - A missing API key is now a distinct, specific error (`TTS_API_KEY_MISSING`, HTTP 500) — separate from any endpoint concern, which cannot occur anymore.
+  - Real provider failures (401/403, 402, 429, timeout, network, bad audio) map to explicit error codes and are returned to the UI; they are never replaced with a beep tone.
+  - Cloned/teacher voice failure falls back to the default voice with a visible `notice`; if the default voice fails too, the explicit error is shown.
+  - Startup logs the active STT, TTS, LLM, Embedding and VoiceClone providers with their config value and mock/real flag (no secrets).
+  - Tests (`tests/backend/test_tts.py`): success (binary + JSON base64), missing key, 401/402/403/429, timeout, corrupt audio, endpoint default + override; `tests/backend/test_student_experience.py`: default voice, authorized cloned voice, and cloned→default fallback with notice.
+  - Mock audio is labelled in the UI; the mock beep is only ever produced by the Mock provider, never as a fallback for a real failure.
 
 ### Bug 2: STT Language Code Mapping
 * **Issue**: When speaking English, the transcript came back in Hindi.

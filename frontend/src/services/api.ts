@@ -41,7 +41,18 @@ async function request(endpoint: string, options: RequestInit = {}) {
 
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
-    throw new Error(data.detail || `Request failed with status ${res.status}`);
+    const detail = data.detail;
+    let message: string;
+    if (typeof detail === "string") {
+      message = detail;
+    } else if (detail && typeof detail === "object" && detail.message) {
+      message = detail.code ? `${detail.code}: ${detail.message}` : detail.message;
+    } else if (Array.isArray(detail)) {
+      message = detail.map((item: any) => item.msg || JSON.stringify(item)).join("; ");
+    } else {
+      message = `Request failed with status ${res.status}`;
+    }
+    throw new Error(message);
   }
   return data;
 }
