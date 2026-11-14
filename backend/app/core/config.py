@@ -27,8 +27,29 @@ class Settings(BaseSettings):
             f"@{self.DATABASE_HOST}:{self.DATABASE_PORT}/{self.DATABASE_NAME}"
         )
 
+    # JWT
+    JWT_ALGORITHM: str = "HS256"
+    JWT_EXPIRE_MINUTES: int = 60
+
+    # Test database (used only by pytest)
+    TEST_DATABASE_NAME: str = "shikshasaathi_test"
+
+    @property
+    def TEST_DATABASE_URL(self) -> str:
+        return (
+            f"postgresql://{self.DATABASE_USER}:{self.DATABASE_PASSWORD}"
+            f"@{self.DATABASE_HOST}:{self.DATABASE_PORT}/{self.TEST_DATABASE_NAME}"
+        )
+
+    # Uploads
+    UPLOAD_DIR: str = "./uploads"
+    MAX_UPLOAD_SIZE_MB: int = 20
+
     # CORS
     CORS_ORIGINS: list[str] = ["http://localhost:5173"]
+
+    # Frontend
+    VITE_API_BASE_URL: str = "http://localhost:8000"
 
     # Gnani API keys (populated in later phases)
     GNANI_API_KEY: str = ""

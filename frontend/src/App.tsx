@@ -1,24 +1,33 @@
 import { useState, useEffect } from "react";
+import { getToken, api } from "./services/api";
+import { Login } from "./components/Login";
+import { TeacherDashboard } from "./components/TeacherDashboard";
 
 function App() {
-  const [health, setHealth] = useState<string>("checking…");
+  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
+  const [loading, setLoading] = useState<boolean>(true);
 
   useEffect(() => {
-    fetch("/health")
-      .then((r) => r.json())
-      .then((d) => setHealth(d.status))
-      .catch(() => setHealth("unreachable"));
+    const token = getToken();
+    if (token) {
+      api.getMe()
+        .then(() => setIsAuthenticated(true))
+        .catch(() => setIsAuthenticated(false))
+        .finally(() => setLoading(false));
+    } else {
+      setLoading(false);
+    }
   }, []);
 
-  return (
-    <main style={{ fontFamily: "system-ui", textAlign: "center", marginTop: "4rem" }}>
-      <h1>🎓 ShikshaSaathi Voice</h1>
-      <p>Multilingual AI-powered educational voice tutor</p>
-      <p>
-        Backend status: <strong>{health}</strong>
-      </p>
-    </main>
-  );
+  if (loading) {
+    return <div style={{ textAlign: "center", marginTop: "4rem" }}>Loading ShikshaSaathi Voice...</div>;
+  }
+
+  if (!isAuthenticated) {
+    return <Login onLoginSuccess={() => setIsAuthenticated(true)} />;
+  }
+
+  return <TeacherDashboard onLogout={() => setIsAuthenticated(false)} />;
 }
 
 export default App;
