@@ -51,6 +51,12 @@ class Settings(BaseSettings):
     # Frontend
     VITE_API_BASE_URL: str = "http://localhost:8000"
 
+    # LLM provider ("mock" or "gemini"; unset -> MockLLMService)
+    LLM_PROVIDER: str = ""
+    # Gemini text model (current free-tier model by default)
+    LLM_MODEL: str = "gemini-4-hydrogen"
+    GEMINI_API_KEY: str = ""
+
     # Gnani API keys (populated in later phases)
     GNANI_API_KEY: str = ""
     GNANI_PRISMA_ENDPOINT: str = ""
