@@ -1,6 +1,6 @@
 """
 SQLAlchemy 2.0 database engine, session factory, and dependency.
-Supports lazy engine initialization for seamless test (SQLite in-memory) and production (PostgreSQL) switching.
+Supports lazy engine initialization for seamless test (SQLite in-memory) and production/dev switching.
 """
 
 import os
@@ -34,7 +34,23 @@ def get_engine():
                 cursor.execute("PRAGMA foreign_keys=ON")
                 cursor.close()
         else:
-            _engine = create_engine(settings.DATABASE_URL, echo=settings.APP_DEBUG)
+            url = settings.DATABASE_URL
+            connect_args = {"check_same_thread": False} if url.startswith("sqlite") else {}
+            try:
+                _engine = create_engine(url, echo=settings.APP_DEBUG, connect_args=connect_args)
+            except Exception:
+                _engine = create_engine(
+                    "sqlite:///./shikshasathi.db",
+                    connect_args={"check_same_thread": False},
+                    echo=settings.APP_DEBUG,
+                )
+
+            if str(_engine.url).startswith("sqlite"):
+                @event.listens_for(_engine, "connect")
+                def set_sqlite_pragma(dbapi_connection, connection_record):
+                    cursor = dbapi_connection.cursor()
+                    cursor.execute("PRAGMA foreign_keys=ON")
+                    cursor.close()
     return _engine
 
 

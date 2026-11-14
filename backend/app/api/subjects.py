@@ -1,13 +1,13 @@
 """
-Subject CRUD routes (teacher-only, scoped to current teacher).
+Subject CRUD routes (teachers create/edit, students view, teacher isolation enforced).
 """
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.core.security import require_teacher
-from app.models.user import User
+from app.core.security import get_current_user, require_teacher
+from app.models.user import User, UserRole
 from app.models.subject import Subject
 from app.schemas.materials import (
     SubjectCreate,
@@ -39,22 +39,26 @@ def create_subject(
 
 @router.get("", response_model=list[SubjectResponse])
 def list_subjects(
-    teacher: User = Depends(require_teacher),
+    user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """List all subjects owned by the authenticated teacher."""
-    return db.query(Subject).filter(Subject.teacher_id == teacher.id).all()
+    """List subjects (teachers see their own subjects, students see all available subjects)."""
+    if user.role == UserRole.teacher:
+        return db.query(Subject).filter(Subject.teacher_id == user.id).all()
+    return db.query(Subject).all()
 
 
 @router.get("/{subject_id}", response_model=SubjectResponse)
 def get_subject(
     subject_id: int,
-    teacher: User = Depends(require_teacher),
+    user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Get a specific subject by ID (must belong to teacher)."""
-    subject = db.query(Subject).filter(Subject.id == subject_id, Subject.teacher_id == teacher.id).first()
+    """Get a specific subject by ID (teachers can only access their own subjects)."""
+    subject = db.get(Subject, subject_id)
     if not subject:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Subject not found")
+    if user.role == UserRole.teacher and subject.teacher_id != user.id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Subject not found")
     return subject
 
@@ -66,7 +70,7 @@ def update_subject(
     teacher: User = Depends(require_teacher),
     db: Session = Depends(get_db),
 ):
-    """Update a subject."""
+    """Update a subject (teacher only)."""
     subject = db.query(Subject).filter(Subject.id == subject_id, Subject.teacher_id == teacher.id).first()
     if not subject:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Subject not found")
@@ -87,7 +91,7 @@ def delete_subject(
     teacher: User = Depends(require_teacher),
     db: Session = Depends(get_db),
 ):
-    """Delete a subject and all its chapters/documents."""
+    """Delete a subject (teacher only)."""
     subject = db.query(Subject).filter(Subject.id == subject_id, Subject.teacher_id == teacher.id).first()
     if not subject:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Subject not found")
@@ -100,11 +104,20 @@ def delete_subject(
 @router.get("/{subject_id}/chapters", response_model=list[ChapterResponse])
 def list_subject_chapters(
     subject_id: int,
-    teacher: User = Depends(require_teacher),
+    user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
+    ready_only: bool = False,
 ):
-    """List chapters for a specific subject owned by teacher."""
-    subject = db.query(Subject).filter(Subject.id == subject_id, Subject.teacher_id == teacher.id).first()
+    """List chapters for a specific subject (students only see chapters with at least one ready document)."""
+    subject = db.get(Subject, subject_id)
     if not subject:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Subject not found")
+    if user.role == UserRole.teacher and subject.teacher_id != user.id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Subject not found")
+
+    if user.role == UserRole.student or ready_only:
+        return [
+            chap for chap in subject.chapters
+            if any(doc.status == "ready" for doc in chap.documents)
+        ]
     return subject.chapters

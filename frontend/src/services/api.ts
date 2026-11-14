@@ -98,4 +98,84 @@ export const api = {
 
   deleteDocument: (documentId: number) =>
     request(`/documents/${documentId}`, { method: "DELETE" }),
+
+  fetchDocumentFile: async (documentId: number): Promise<ArrayBuffer> => {
+    const token = getToken();
+    const headers: HeadersInit = {};
+    if (token) {
+      headers["Authorization"] = `Bearer ${token}`;
+    }
+    const res = await fetch(`/api/documents/${documentId}/file`, { headers });
+    if (!res.ok) {
+      const errData = await res.json().catch(() => ({}));
+      throw new Error(errData.detail || `Failed to fetch file (${res.status})`);
+    }
+    return res.arrayBuffer();
+  },
+
+  getPreferences: () => request("/me/preferences"),
+
+  updatePreferences: (data: {
+    voice_profile_id: number | null;
+    question_language?: string;
+    answer_language?: string;
+  }) =>
+    request("/me/preferences", {
+      method: "PUT",
+      body: JSON.stringify(data),
+    }),
+
+  getVoices: () => request("/voices"),
+
+  speakText: (text: string, voiceProfileId: number | null, language: string = "en") =>
+    request("/tts/speak", {
+      method: "POST",
+      body: JSON.stringify({
+        text,
+        voice_profile_id: voiceProfileId,
+        language,
+      }),
+    }),
+
+  transcribeAudio: (audioBlob: Blob, languageCode: string = "indic-auto") => {
+    const formData = new FormData();
+    const mime = audioBlob.type || "";
+    let filename = "audio.wav";
+    if (mime.includes("webm")) {
+      filename = "audio.webm";
+    } else if (mime.includes("mp4") || mime.includes("m4a")) {
+      filename = "audio.m4a";
+    } else if (mime.includes("mp3") || mime.includes("mpeg")) {
+      filename = "audio.mp3";
+    } else if (mime.includes("ogg")) {
+      filename = "audio.ogg";
+    }
+
+    formData.append("audio", audioBlob, filename);
+    formData.append("language_code", languageCode);
+    return request("/stt/transcribe", {
+      method: "POST",
+      body: formData,
+    });
+  },
+
+  askQuestion: (
+    question: string,
+    chapterId?: number,
+    answerLanguage: string = "en",
+    level: string = "intermediate",
+    currentPage?: number,
+    history?: any[]
+  ) =>
+    request("/ask", {
+      method: "POST",
+      body: JSON.stringify({
+        question,
+        chapter_id: chapterId,
+        answer_language: answerLanguage,
+        level,
+        current_page: currentPage,
+        history,
+      }),
+    }),
 };

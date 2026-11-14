@@ -5,6 +5,7 @@ Uses SQLite in-memory database for fast, isolated test execution.
 
 import os
 os.environ["APP_ENV"] = "test"
+os.environ["LLM_PROVIDER"] = "mock"
 
 import pytest
 from fastapi.testclient import TestClient
@@ -12,8 +13,15 @@ from fastapi.testclient import TestClient
 # Import models FIRST so Base.metadata populates them before create_all
 import app.models  # noqa: F401
 
+from app.core.config import settings
 from app.core.database import Base, SessionLocal, get_engine, get_db
 from app.main import app as fastapi_app
+
+
+@pytest.fixture(autouse=True)
+def default_mock_llm(monkeypatch):
+    """Ensure tests always default to mock LLM without live external API calls."""
+    monkeypatch.setattr(settings, "LLM_PROVIDER", "mock")
 
 
 @pytest.fixture(autouse=True)

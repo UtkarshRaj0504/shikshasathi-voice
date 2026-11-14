@@ -16,10 +16,11 @@ class FlexibleVector(TypeDecorator):
     """Uses native PGVector on PostgreSQL, and JSON-encoded Text on SQLite."""
     impl = Text
     cache_ok = True
+    comparator_factory = PGVector.comparator_factory
 
     def load_dialect_impl(self, dialect):
         if dialect.name == "postgresql":
-            return dialect.type_descriptor(PGVector(1536))
+            return dialect.type_descriptor(PGVector(384))
         else:
             return dialect.type_descriptor(Text())
 
@@ -43,6 +44,7 @@ class DocumentChunk(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     document_id: Mapped[int] = mapped_column(ForeignKey("documents.id", ondelete="CASCADE"), nullable=False)
     chunk_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    page_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
     content: Mapped[str] = mapped_column(Text, nullable=False)
     embedding: Mapped[list[float]] = mapped_column(FlexibleVector, nullable=False)
     created_at: Mapped[datetime] = mapped_column(

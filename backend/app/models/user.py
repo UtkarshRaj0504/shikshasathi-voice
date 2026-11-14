@@ -35,3 +35,9 @@ class User(Base):
     subjects: Mapped[list["Subject"]] = relationship(  # noqa: F821
         back_populates="teacher", lazy="selectin"
     )
+    voice_profiles: Mapped[list["VoiceProfile"]] = relationship(  # noqa: F821
+        back_populates="teacher", cascade="all, delete-orphan", lazy="selectin"
+    )
+    preferences: Mapped["UserPreference | None"] = relationship(  # noqa: F821
+        back_populates="user", uselist=False, cascade="all, delete-orphan", lazy="selectin"
+    )

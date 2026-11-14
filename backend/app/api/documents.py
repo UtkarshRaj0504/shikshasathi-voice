@@ -4,13 +4,15 @@ Document upload, status, list, and delete routes (teacher-only).
 
 import os
 import uuid
+import mimetypes
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile, status
+from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.database import get_db
-from app.core.security import require_teacher
-from app.models.user import User
+from app.core.security import get_current_user, require_teacher
+from app.models.user import User, UserRole
 from app.models.subject import Subject
 from app.models.chapter import Chapter
 from app.models.document import Document
@@ -86,38 +88,83 @@ async def upload_document(
 @router.get("/chapters/{chapter_id}/documents", response_model=list[DocumentResponse])
 def list_chapter_documents(
     chapter_id: int,
-    teacher: User = Depends(require_teacher),
+    user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """List all documents uploaded to a chapter."""
+    """List all documents uploaded to a chapter (available to teachers and students)."""
     chapter = db.get(Chapter, chapter_id)
     if not chapter:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Chapter not found")
-
-    subject = db.query(Subject).filter(Subject.id == chapter.subject_id, Subject.teacher_id == teacher.id).first()
-    if not subject:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
-
     return chapter.documents
 
 
 @router.get("/documents/{document_id}", response_model=DocumentResponse)
 def get_document_status(
     document_id: int,
-    teacher: User = Depends(require_teacher),
+    user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Get document status and details."""
+    """Get document status and details (available to teachers and students)."""
+    doc = db.get(Document, document_id)
+    if not doc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
+    return doc
+
+
+@router.get("/documents/{document_id}/file")
+def get_document_file(
+    document_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Stream document file with correct content type.
+    - Students can only access documents with status 'ready'.
+    - Teachers can only access documents belonging to their own subjects.
+    - Unauthenticated requests are rejected by get_current_user (401).
+    """
     doc = db.get(Document, document_id)
     if not doc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
 
     chapter = db.get(Chapter, doc.chapter_id)
-    subject = db.query(Subject).filter(Subject.id == chapter.subject_id, Subject.teacher_id == teacher.id).first()
+    if not chapter:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Chapter not found")
+
+    subject = db.get(Subject, chapter.subject_id)
     if not subject:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Subject not found")
+
+    if user.role == UserRole.teacher:
+        if subject.teacher_id != user.id:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied: teacher does not own this document")
+    elif user.role == UserRole.student:
+        if doc.status != "ready":
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied: document is not ready")
+    else:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
 
-    return doc
+    if not os.path.exists(doc.file_path):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found on storage")
+
+    content_type, _ = mimetypes.guess_type(doc.filename)
+    if not content_type:
+        ext = os.path.splitext(doc.filename)[1].lower()
+        if ext == ".pdf":
+            content_type = "application/pdf"
+        elif ext == ".docx":
+            content_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        elif ext in [".txt", ".md"]:
+            content_type = "text/plain; charset=utf-8"
+        else:
+            content_type = "application/octet-stream"
+
+    return FileResponse(
+        path=doc.file_path,
+        media_type=content_type,
+        filename=doc.filename,
+        content_disposition_type="inline",
+    )
 
 
 @router.delete("/documents/{document_id}", status_code=status.HTTP_204_NO_CONTENT)
