@@ -14,12 +14,13 @@ network calls) and committed.
 | Bug 7 — Voice-clone preview played a beep (mock used by default) | Done | `ed05314` |
 | Bug 8 — `POST /voice-profiles` failed with an opaque HTTP 400 ("not cloning") | Done | `f3e7c3f` |
 | Bug 9 — `VOICE_CLONE_PROVIDER_ERROR` (Gnani embeddings HTTP 500 not retried) | Done | `c544f81` |
-| Bug 10 — same HTTP 500 persisted: browser WebM/Opus audio sent to the provider | Done | (this commit) |
+| Bug 10 — same HTTP 500 persisted: browser WebM/Opus audio sent to the provider | Done | `7ea77dc` |
+| Bug 11 — `TTS_RATE_LIMIT` (Gnani HTTP 429 not retried) + aliased in-browser downsample | Done | `ede919b` |
 | Feature — Teacher voice cloning (Gnani Vachana) | Done | `e43f81c` |
 
 ## Test results (last run)
 
-- Backend: `python -m pytest tests/backend -q` → **131 passed**.
+- Backend: `python -m pytest tests/backend -q` → **134 passed**.
 - Frontend: `npm run build` → exit 0 (only the pre-existing pdfjs `eval` and chunk-size warnings).
 - Frontend unit tests: `npx vitest run` → **13 passed** (2 files).
 
@@ -87,6 +88,40 @@ on the **decoded** audio (the old byte-size estimate wrongly rejected short-but-
 clips). `POST /voice-profiles` calls this right after `validate_reference_audio()` and always sends
 the provider a `sample.wav`. See `docs/DECISIONS.md` §7l. Three tests were added (normalized output is
 16 kHz mono WAV; undecodable bytes raise; a real WebM/Opus upload creates an active profile).
+
+## BUG 11 — `TTS_RATE_LIMIT: Gnani TTS rate limit exceeded` (no output audio)
+
+**Symptom**: the student spoke a question, got a transcript back, but heard no audio; the UI
+showed `TTS_RATE_LIMIT: Gnani TTS rate limit exceeded. Please try again in a minute.` — Gnani
+answered the TTS call with HTTP **429**.
+
+**Root cause** (docs + code): Gnani limits the account to **one active request at a time**, so a
+429 means "a request was still running", not "you are out of quota"; the docs explicitly say the
+429 carries **no `Retry-After` header** and must be answered by *waiting and retrying with
+backoff* (`429/500/503/504`). `GnaniTimbreTTSService.synthesize_speech()` treated the very first
+429 as terminal and raised, so any transient collision (the voice flow also makes a cloned-voice
+attempt before the default-voice call) surfaced as a hard failure with no audio.
+
+**Fix**:
+- `GnaniTimbreTTSService` now retries `429/500/503/504` with exponential backoff
+  (`0.5 s, 1 s, 2 s`; 4 attempts total), honouring `Retry-After` when the provider does send it
+  (capped at 8 s). The existing "HTTP 500 → retry once with `language=auto`" behaviour is kept and
+  composes with the new loop. Decisions: `docs/DECISIONS.md` §7m.
+- The student recorder no longer decimates 48 kHz → 16 kHz with a **filterless box average**
+  (which aliases). It sends the device-rate WAV and the backend resamples it to 16 kHz mono with
+  PyAV's anti-aliased polyphase resampler (`convert_audio_to_wav`), so the speech the provider
+  hears is a faithful, properly band-limited 16 kHz stream. Decision: §7n.
+- Five tests were added/updated: a transient 429 retries then succeeds; a 503 retries then
+  succeeds; a persistent 429 exhausts the attempts and still surfaces `TTS_RATE_LIMIT`; the
+  backoff honours `Retry-After` and otherwise doubles from 0.5 s.
+
+**Not changed (evidence)**: live probes (`indic-auto`, `en-IN`, `hi-IN`) on clean English speech
+all returned an **`en-IN`** transcript, and the same probe through the old box downsampler still
+returned `en-IN` — so the "English heard as Hindi" report is not caused by the language-code
+mapping (Bug 2) nor by a hard decoder bug. `language_code` is documented as a **hint**: the model
+detects from the audio. The guaranteed path for an English question remains the explicit
+**"English"** choice in the *I Will Speak In* selector; the ambiguous Indian-English case with
+`indic-auto` is the provider's detection. See §7n/§7o in `docs/DECISIONS.md`.
 
 ## BUG 1 — RAG grounding false negatives
 

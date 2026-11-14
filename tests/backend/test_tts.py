@@ -23,6 +23,8 @@ from app.services.tts_service import (
     GnaniTimbreTTSService,
     TTSError,
     get_tts_service,
+    MAX_TTS_ATTEMPTS,
+    retry_delay_seconds,
 )
 
 
@@ -168,14 +170,79 @@ def test_gnani_timbre_tts_429_rate_limit():
 
     mock_resp = MagicMock()
     mock_resp.status_code = 429
+    mock_resp.headers = {}
     mock_resp.text = "Rate limit exceeded"
 
-    with patch("httpx.Client.post", return_value=mock_resp):
+    with patch("app.services.tts_service.time.sleep"), patch(
+        "httpx.Client.post", return_value=mock_resp
+    ) as mock_post:
         with pytest.raises(TTSError) as exc_info:
             service.synthesize_speech("Testing rate limit")
         assert exc_info.value.status_code == 429
+        assert exc_info.value.error_code == "TTS_RATE_LIMIT"
         assert "rate limit exceeded" in exc_info.value.message.lower()
         assert "try again in a minute" in exc_info.value.message.lower()
+        # BUG 11: a 429 is retried with backoff before it is surfaced.
+        assert mock_post.call_count == MAX_TTS_ATTEMPTS
+
+
+# BUG 11 regression tests: an account-level rate limit (HTTP 429) is transient and must
+# be retried with backoff instead of surfacing "TTS_RATE_LIMIT" on the first response.
+def test_gnani_tts_retries_transient_429_then_succeeds():
+    dummy_wav = b"RIFF" + b"\x00" * 36 + b"WAVEfmt " + b"\x00" * 20 + b"data" + b"\x00" * 100
+    service = GnaniTimbreTTSService(
+        endpoint="https://api.vachana.ai/api/v1/tts/inference",
+        api_key="test-gnani-key",
+    )
+
+    limited = MagicMock()
+    limited.status_code = 429
+    limited.headers = {}
+    limited.text = (
+        '{"detail":{"error_code":"RATE_LIMITED","message":"Only 1 active request is '
+        'allowed at a time.","status_code":429}}'
+    )
+
+    with patch("app.services.tts_service.time.sleep") as mock_sleep, patch(
+        "httpx.Client.post", side_effect=[limited, _gnani_ok_response(dummy_wav)]
+    ) as mock_post:
+        result = service.synthesize_speech("Photosynthesis is how plants make food.", language="en-IN")
+
+    assert result == dummy_wav
+    assert mock_post.call_count == 2
+    mock_sleep.assert_called_once()
+
+
+def test_gnani_tts_retries_503_then_succeeds():
+    dummy_wav = b"RIFF" + b"\x00" * 36 + b"WAVEfmt " + b"\x00" * 20 + b"data" + b"\x00" * 100
+    service = GnaniTimbreTTSService(
+        endpoint="https://api.vachana.ai/api/v1/tts/inference",
+        api_key="test-gnani-key",
+    )
+
+    unavailable = MagicMock()
+    unavailable.status_code = 503
+    unavailable.headers = {}
+    unavailable.text = "Service Unavailable"
+
+    with patch("app.services.tts_service.time.sleep"), patch(
+        "httpx.Client.post", side_effect=[unavailable, _gnani_ok_response(dummy_wav)]
+    ) as mock_post:
+        result = service.synthesize_speech("Photosynthesis", language="en-IN")
+
+    assert result == dummy_wav
+    assert mock_post.call_count == 2
+
+
+def test_retry_delay_seconds_honours_retry_after_header():
+    with_retry_after = MagicMock()
+    with_retry_after.headers = {"Retry-After": "2"}
+    assert retry_delay_seconds(with_retry_after, 0) == 2.0
+
+    # Gnani sends no Retry-After on 429: fall back to exponential backoff (0.5s, 1s, 2s).
+    assert retry_delay_seconds(None, 0) == 0.5
+    assert retry_delay_seconds(None, 1) == 1.0
+    assert retry_delay_seconds(None, 2) == 2.0
 
 
 def test_gnani_timbre_tts_timeout():

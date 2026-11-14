@@ -24,6 +24,7 @@ import math
 import os
 import struct
 import sys
+import time
 
 import httpx
 
@@ -37,6 +38,40 @@ DEFAULT_TTS_MODEL = "timbre-v3.0"
 DEFAULT_TTS_VOICE = "Lakshmi"
 CLONE_TTS_MODEL = "vachana-vc-v1"
 DEFAULT_SAMPLE_RATE = 24000
+
+# Retry guidance (https://docs.gnani.ai/api/introduction/errors): retry 429/500/503/504
+# with exponential backoff. Gnani's 429 ("Only 1 active request is allowed at a time")
+# deliberately sends no Retry-After header, so the caller must back off and retry.
+RETRYABLE_STATUS_CODES = frozenset({429, 500, 503, 504})
+MAX_TTS_ATTEMPTS = 4  # 1 initial call + 3 retries
+BASE_RETRY_BACKOFF_SECONDS = 0.5
+MAX_RETRY_BACKOFF_SECONDS = 8.0
+
+
+def _retry_after_header(response: httpx.Response | None) -> str:
+    """Read Retry-After case-insensitively (httpx.Headers already is; plain dicts are not)."""
+    headers = getattr(response, "headers", None)
+    if headers is None:
+        return ""
+    for key in ("retry-after", "Retry-After"):
+        try:
+            value = headers.get(key)
+        except Exception:  # noqa: BLE001 - an odd header mapping must never break retries
+            return ""
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def retry_delay_seconds(response: httpx.Response | None, attempt: int) -> float:
+    """Backoff before retry ``attempt`` (0-based), honouring Retry-After when sent."""
+    retry_after = _retry_after_header(response)
+    if retry_after:
+        try:
+            return min(max(float(retry_after), 0.0), MAX_RETRY_BACKOFF_SECONDS)
+        except ValueError:
+            pass
+    return min(BASE_RETRY_BACKOFF_SECONDS * (2 ** attempt), MAX_RETRY_BACKOFF_SECONDS)
 
 
 class TTSError(Exception):
@@ -353,13 +388,30 @@ class GnaniTimbreTTSService(TTSService):
             except httpx.RequestError:
                 raise TTSError("Network error connecting to Gnani TTS service.", status_code=502, error_code="TTS_NETWORK")
 
-        res = _post(payload)
-        if res.status_code == 500 and lang_code != "auto":
-            # Gnani returns a generic HTTP 500 ("We are facing technical difficulties")
-            # when it cannot process the requested language for this text. Retry once
-            # with script-based auto-detection so non-English audio is still produced.
-            logger.warning("Gnani TTS returned HTTP 500 for language %s; retrying with 'auto'.", lang_code)
-            res = _post({**payload, "language": "auto"})
+        res = None
+        retried_with_auto = False
+        for attempt in range(MAX_TTS_ATTEMPTS):
+            request_payload = {**payload, "language": "auto"} if retried_with_auto else payload
+            res = _post(request_payload)
+            if res.status_code not in RETRYABLE_STATUS_CODES:
+                break
+            if res.status_code == 500 and not retried_with_auto and lang_code != "auto":
+                # Gnani returns a generic HTTP 500 ("We are facing technical difficulties")
+                # when it cannot process the requested language for this text. Retry once
+                # with script-based auto-detection so non-English audio is still produced.
+                logger.warning("Gnani TTS returned HTTP 500 for language %s; retrying with 'auto'.", lang_code)
+                retried_with_auto = True
+                continue
+            if attempt < MAX_TTS_ATTEMPTS - 1:
+                delay = retry_delay_seconds(res, attempt)
+                logger.warning(
+                    "Gnani TTS returned HTTP %s; retrying in %.1fs (attempt %d/%d).",
+                    res.status_code,
+                    delay,
+                    attempt + 1,
+                    MAX_TTS_ATTEMPTS,
+                )
+                time.sleep(delay)
 
         if res.status_code in (401, 403):
             raise TTSError(

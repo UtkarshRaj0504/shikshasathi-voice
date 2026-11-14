@@ -61,6 +61,19 @@ message. So a *200/active* result no longer depends on the browser producing WAV
 survives retries is now genuinely provider-side (**escalate with the timestamp and body text**),
 while an `INVALID_AUDIO` 400 means the recording could not be read and should be re-recorded.
 
+**Note (Bug 11)**: the account allows **only one active request at a time**, so TTS can return
+`429 RATE_LIMITED` whenever another Gnani call is still in flight — including the second call a
+single voice question makes (cloned-voice attempt, then default voice). A 429 means "wait", not
+"out of quota", and Gnani sends **no `Retry-After`**, so TTS now **retries `429/500/503/504` with
+exponential backoff (0.5 s, 1 s, 2 s — 4 attempts)** before surfacing `TTS_RATE_LIMIT` (HTTP 429);
+`Retry-After` is honoured if it ever appears. If `TTS_RATE_LIMIT` still reaches the UI, another
+person/session is holding the account's single slot — retry, or share the key less aggressively.
+Separately, the student recorder now sends the **device-rate** WAV and the server resamples it
+(anti-aliased, PyAV) instead of the browser's naive box decimation. Note that Gnani documents
+`language_code` as a *hint*: with `indic-auto`, the spoken language is detected **from the audio**,
+so an accented/narrow-band English clip can still be recognised as Hindi — choose **English**
+explicitly in *I Will Speak In* when the question is in English.
+
 ### Previously Resolved
 - ✅ TTS mock vs real provider selection (fixed in DECISIONS.md decision 4a)
 - ✅ Voice model/voice pairing (timbre-v3.0 + Lakshmi documented)

@@ -35,28 +35,6 @@ function writeString(view: DataView, offset: number, str: string) {
   }
 }
 
-function downsampleBuffer(buffer: Float32Array, inputRate: number, outputRate: number): Float32Array {
-  if (inputRate === outputRate) return buffer;
-  const sampleRateRatio = inputRate / outputRate;
-  const newLength = Math.round(buffer.length / sampleRateRatio);
-  const result = new Float32Array(newLength);
-  let offsetResult = 0;
-  let offsetBuffer = 0;
-  while (offsetResult < result.length) {
-    const nextOffsetBuffer = Math.round((offsetResult + 1) * sampleRateRatio);
-    let accum = 0;
-    let count = 0;
-    for (let i = offsetBuffer; i < nextOffsetBuffer && i < buffer.length; i++) {
-      accum += buffer[i];
-      count++;
-    }
-    result[offsetResult] = count > 0 ? accum / count : 0;
-    offsetResult++;
-    offsetBuffer = nextOffsetBuffer;
-  }
-  return result;
-}
-
 function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
   const buffer = new ArrayBuffer(44 + samples.length * 2);
   const view = new DataView(buffer);
@@ -361,9 +339,10 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ onLogout }) 
         offset += b.length;
       }
 
-      const targetRate = 16000;
-      const downsampled = downsampleBuffer(merged, inputRate, targetRate);
-      const wavBlob = encodeWAV(downsampled, targetRate);
+      // Keep the recording at the device's native rate: the backend resamples it to
+      // 16 kHz mono with an anti-aliased polyphase filter (PyAV) before calling Gnani.
+      // A naive in-browser decimation aliases high frequencies and degraded recognition.
+      const wavBlob = encodeWAV(merged, inputRate);
 
       // Process voice question automatically
       await handleProcessVoiceQuestion(wavBlob);

@@ -6,7 +6,7 @@ obvious. `.env.example` lists every variable; do **not** commit a real `.env`.
 Quick automated checks:
 
 ```
-python -m pytest tests/backend -q      # expect: 131 passed
+python -m pytest tests/backend -q      # expect: 134 passed
 cd frontend ; npm run build            # expect: exit 0
 cd frontend ; npx vitest run           # expect: 13 passed
 ```
@@ -55,6 +55,34 @@ cd frontend ; npx vitest run           # expect: 13 passed
 ### Pass criteria
 - English never comes back as Hindi; native scripts are preserved (no transliteration).
 - The detected language is shown; the choice survives a reload.
+
+---
+
+## BUG 11 — No output audio: `TTS_RATE_LIMIT: Gnani TTS rate limit exceeded`
+
+### How to verify by hand
+1. As a student, open a chapter's study reader and ask a question by voice.
+   - Expect: the answer is spoken. A **transient** rate limit no longer removes the audio —
+     the backend retries `429/500/503/504` with backoff (0.5 s, 1 s, 2 s) and only then reports
+     `TTS_RATE_LIMIT`.
+2. To see the retry at work, watch the backend log while asking several questions quickly:
+   - Expect: `Gnani TTS returned HTTP 429; retrying in 0.5s (attempt 1/4).` and the answer still
+     plays.
+3. To see the genuine failure path, force the provider to keep answering 429 (e.g. point
+   `GNANI_TIMBRE_ENDPOINT` at a stub that always returns 429) → after the attempts are exhausted
+   the UI shows `TTS_RATE_LIMIT: Gnani TTS rate limit exceeded. Please try again in a minute.`
+   (**never** a beep, never silence with no message).
+4. Check the recorded upload: with the DevTools Network tab open, the `/stt/transcribe` request
+   carries a WAV whose sample rate matches the device (often 44100/48000 Hz) — the browser no
+   longer decimates it; the server resamples to 16 kHz mono before calling Gnani.
+5. If English still comes back as Hindi with **Auto-detect**, set *I Will Speak In* to **English**
+   and repeat: the transcript must be English (`Detected language: en-IN`). `indic-auto` is a
+   documented *hint* — the provider detects the spoken language from the audio.
+
+### Pass criteria
+- A transient 429/500/503/504 no longer loses the answer audio (retried with backoff).
+- A persistent 429 shows the explicit `TTS_RATE_LIMIT` error, never a beep.
+- The student recording is uploaded at the device rate and resampled server-side.
 
 ---
 
