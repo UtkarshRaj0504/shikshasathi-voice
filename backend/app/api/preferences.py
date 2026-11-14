@@ -48,13 +48,13 @@ def get_preferences(
     if not pref:
         return PreferenceResponse(
             voice_profile_id=None,
-            question_language="indic-auto",
-            answer_language="en",
+            question_language="indic-auto",  # Default for STT auto-detection
+            answer_language="en",  # Default for TTS/LLM
         )
     return PreferenceResponse(
         voice_profile_id=pref.voice_profile_id,
-        question_language=pref.question_language,
-        answer_language=pref.answer_language,
+        question_language=pref.question_language or "indic-auto",
+        answer_language=pref.answer_language or "en",
     )
 
 
@@ -96,8 +96,8 @@ def update_preferences(
 
     return PreferenceResponse(
         voice_profile_id=pref.voice_profile_id,
-        question_language=pref.question_language,
-        answer_language=pref.answer_language,
+        question_language=pref.question_language or "indic-auto",
+        answer_language=pref.answer_language or "en",
     )
 
 

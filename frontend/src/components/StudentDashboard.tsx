@@ -117,6 +117,7 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ onLogout }) 
   const [seconds, setSeconds] = useState<number>(0);
   const [transcribing, setTranscribing] = useState<boolean>(false);
   const [transcript, setTranscript] = useState<string>("");
+  const [detectedLanguage, setDetectedLanguage] = useState<string | null>(null);
   const [asking, setAsking] = useState<boolean>(false);
   const [ttsLoading, setTtsLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
@@ -232,6 +233,20 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ onLogout }) 
     }
     setShowVoiceModal(false);
     openReaderForChapter(selectedChapter);
+  };
+
+  // Persist the student's spoken (question) language so their choice is remembered.
+  const handleQuestionLanguageChange = async (lang: string) => {
+    setQuestionLanguage(lang);
+    try {
+      await api.updatePreferences({
+        voice_profile_id: selectedVoiceId,
+        question_language: lang,
+        answer_language: answerLanguage,
+      });
+    } catch (err: any) {
+      console.warn("Could not persist question language preference:", err);
+    }
   };
 
   // Step 3: Open Reader
@@ -358,6 +373,8 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ onLogout }) 
       const sttRes = await api.transcribeAudio(audioBlob, questionLanguage);
       transcribedText = (sttRes.transcript || "").trim();
       setTranscript(transcribedText);
+      // Show the language the STT provider actually detected/used.
+      setDetectedLanguage(sttRes.language || null);
     } catch (err: any) {
       console.error("Transcription error:", err);
       setError(err.message || "Failed to transcribe voice question.");
@@ -929,9 +946,33 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ onLogout }) 
           </p>
 
           {/* Language & Level Selector */}
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.75rem", marginBottom: "1rem" }}>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.75rem", marginBottom: "0.75rem" }}>
             <div>
-              <label style={{ fontSize: "0.8rem", fontWeight: 600, display: "block", marginBottom: "0.25rem" }}>Target Language</label>
+              <label style={{ fontSize: "0.8rem", fontWeight: 600, display: "block", marginBottom: "0.25rem" }}>
+                I Will Speak In (Question Language)
+              </label>
+              <select
+                data-testid="question-language-select"
+                value={questionLanguage}
+                onChange={(e) => handleQuestionLanguageChange(e.target.value)}
+                style={{ width: "100%", padding: "0.4rem", borderRadius: "4px", border: "1px solid #ced4da", fontSize: "0.85rem" }}
+              >
+                <option value="indic-auto">Auto-detect (match my voice)</option>
+                <option value="en">English</option>
+                <option value="hi">Hindi (हिन्दी)</option>
+                <option value="kn">Kannada (ಕನ್ನಡ)</option>
+                <option value="ta">Tamil (தமிழ்)</option>
+                <option value="te">Telugu (తెలుగు)</option>
+                <option value="mr">Marathi (मराठी)</option>
+                <option value="gu">Gujarati (ગુજરાતી)</option>
+                <option value="bn">Bengali (বাংলা)</option>
+                <option value="ml">Malayalam (മലയാളം)</option>
+                <option value="pa">Punjabi (ਪੰਜਾਬੀ)</option>
+              </select>
+            </div>
+
+            <div>
+              <label style={{ fontSize: "0.8rem", fontWeight: 600, display: "block", marginBottom: "0.25rem" }}>Answer Language (Tutor's Reply)</label>
               <select
                 value={answerLanguage}
                 onChange={(e) => setAnswerLanguage(e.target.value)}
@@ -951,19 +992,19 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ onLogout }) 
                 <option value="as-IN">Assamese (অসমীয়া)</option>
               </select>
             </div>
+          </div>
 
-            <div>
-              <label style={{ fontSize: "0.8rem", fontWeight: 600, display: "block", marginBottom: "0.25rem" }}>Explanation Level</label>
-              <select
-                value={level}
-                onChange={(e) => setLevel(e.target.value)}
-                style={{ width: "100%", padding: "0.4rem", borderRadius: "4px", border: "1px solid #ced4da", fontSize: "0.85rem" }}
-              >
-                <option value="beginner">Beginner (Simple & examples)</option>
-                <option value="intermediate">Intermediate (Standard)</option>
-                <option value="advanced">Advanced (Deep technical)</option>
-              </select>
-            </div>
+          <div style={{ marginBottom: "1rem" }}>
+            <label style={{ fontSize: "0.8rem", fontWeight: 600, display: "block", marginBottom: "0.25rem" }}>Explanation Level</label>
+            <select
+              value={level}
+              onChange={(e) => setLevel(e.target.value)}
+              style={{ width: "100%", padding: "0.4rem", borderRadius: "4px", border: "1px solid #ced4da", fontSize: "0.85rem" }}
+            >
+              <option value="beginner">Beginner (Simple & examples)</option>
+              <option value="intermediate">Intermediate (Standard)</option>
+              <option value="advanced">Advanced (Deep technical)</option>
+            </select>
           </div>
 
           {/* Recording & Action Controls */}
@@ -1023,6 +1064,14 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ onLogout }) 
             <div>
               <label style={{ fontSize: "0.85rem", fontWeight: 600, color: "#495057", display: "block", marginBottom: "0.25rem" }}>
                 Question Transcript (Editable):
+                {detectedLanguage && (
+                  <span
+                    data-testid="detected-language"
+                    style={{ marginLeft: "0.5rem", fontWeight: 500, color: "#0d6efd", fontSize: "0.8rem" }}
+                  >
+                    Detected language: {detectedLanguage}
+                  </span>
+                )}
               </label>
               <textarea
                 value={transcript}

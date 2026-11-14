@@ -14,8 +14,15 @@ from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
-# Normalize supported language codes to Gnani Prisma expected codes
-# Gnani v3 supported: as-IN, bn-IN, en-IN, gu-IN, hi-IN, indic-auto, kn-IN, ml-IN, mr-IN, pa-IN, ta-IN, te-IN
+# Normalize input language code to the BCP-47 codes Gnani Prisma v3.0 expects.
+#
+# Verified against https://docs.gnani.ai/api/STT/speech-to-text:
+#   - language_code is a BCP-47 code (region part uppercase, e.g. "en-IN").
+#   - Prisma v3.0 accepts one language, or "indic-auto" for documented
+#     auto-detection across Indian languages, or a comma-separated list of 1-4.
+#   - Lowercase region codes ("en-in") and unsupported codes return HTTP 400
+#     INVALID_LANGUAGE_CODE. as-IN is NOT supported by prisma-v3.0
+#     (MODEL_UNSUPPORTED_LANGUAGE), so it is routed through auto-detect instead.
 LANGUAGE_CODE_MAP = {
     "auto": "indic-auto",
     "indic-auto": "indic-auto",
@@ -40,15 +47,24 @@ LANGUAGE_CODE_MAP = {
     "ml-in": "ml-IN",
     "pa": "pa-IN",
     "pa-in": "pa-IN",
-    "as": "as-IN",
-    "as-in": "as-IN",
+    # as-IN is a valid Gnani code but prisma-v3.0 does not cover it; auto-detect.
+    "as": "indic-auto",
+    "as-in": "indic-auto",
 }
+
+# The documented auto-detect value for Prisma v3.0.
+DEFAULT_LANGUAGE_CODE = "indic-auto"
 
 
 def normalize_language_code(language_code: str) -> str:
-    """Normalize input language code to Gnani supported format."""
-    cleaned = (language_code or "indic-auto").strip().lower()
-    return LANGUAGE_CODE_MAP.get(cleaned, "indic-auto")
+    """Normalize an input language code to a Gnani Prisma v3.0 BCP-47 code.
+
+    "auto" maps to the documented auto-detect behaviour ("indic-auto"), which is
+    also the fallback for empty/unknown input. It never silently maps to a
+    specific language such as Hindi, so speaking English is never forced to Hindi.
+    """
+    cleaned = (language_code or DEFAULT_LANGUAGE_CODE).strip().lower()
+    return LANGUAGE_CODE_MAP.get(cleaned, DEFAULT_LANGUAGE_CODE)
 
 
 def convert_audio_to_wav(audio_bytes: bytes, target_sample_rate: int = 16000) -> bytes:
@@ -115,11 +131,13 @@ class MockSTTService(STTService):
             "auto": "What is photosynthesis and how do plants make their food?",
             "indic-auto": "What is photosynthesis and how do plants make their food?",
         }
+        # Report the normalized (BCP-47) / detected language, mirroring the real
+        # provider's ``detected_language_code`` field. Never echo the raw input
+        # back, so the transcript response always shows a concrete language code
+        # instead of a stale/invalid one.
         normalized = normalize_language_code(language_code)
         text = transcripts.get(normalized, transcripts.get(language_code, transcripts["en-IN"]))
-        # Keep original language_code if provided, else resolved code
-        resolved_lang = language_code if language_code else normalized
-        return {"transcript": text, "language": resolved_lang}
+        return {"transcript": text, "language": normalized}
 
 
 class GnaniPrismaSTTService(STTService):

@@ -61,15 +61,18 @@
   - Cloned voice fallback to default voice with notice (not to mock)
 
 ### Bug 2: STT Language Code Mapping
-* **Issue**: When speaking English, transcript comes back in Hindi.
-* **Root Cause**: Language selector defaulted to or was mapped incorrectly, or frontend sent wrong language_code.
+* **Issue**: When speaking English, the transcript came back in Hindi.
+* **Root Cause**: `normalize_language_code()` mapped the student's default ("auto"/unknown/empty) to a concrete `hi-IN`, and the mock provider echoed the raw input code back as the "detected" language instead of a normalized one. There was also no separate question-language selector in the UI, so the student could not tell the tutor which language they were actually speaking.
 * **Fix**:
-  - Student language selector now defaults to "indic-auto" (not Hindi)
-  - Language code mapping verified against Gnani docs (auto→indic-auto, en→en-IN, hi→hi-IN, kn→kn-IN)
-  - Frontend sends question_language (not answer_language) to /stt/transcribe
-  - /me/preferences stores and returns question_language separately from answer_language
-  - Transcript response includes detected_language so UI shows what was detected
-  - Native scripts preserved (Kannada ಕನ್ನಡ, Hindi हिन्दी, English as-is)
+  - `LANGUAGE_CODE_MAP` verified against https://docs.gnani.ai/api/STT/speech-to-text (BCP-47, region uppercase). `auto`/`indic-auto`/"unknown"/"" now map to the documented auto-detect value `indic-auto` (`DEFAULT_LANGUAGE_CODE`), never to Hindi.
+  - `as`/`as-IN` is not supported by `prisma-v3.0`, so it is routed through auto-detect (`indic-auto`) instead of being sent as an unsupported code.
+  - `MockSTTService` and the Gnani service both return a concrete normalized/detected language code (`normalized` / `detected_language_code`), so the transcript response always shows the language actually used.
+  - New dedicated **"I Will Speak In (Question Language)"** selector in `StudentDashboard.tsx` (default `indic-auto`), persisted via `PUT /me/preferences` `question_language` so the student's choice is remembered. `question_language` (STT) is kept separate from `answer_language` (LLM/TTS).
+  - The transcript box now shows the detected language (`Detected language: <code>`).
+  - Native scripts are preserved: Kannada→ಕನ್ನಡ, Hindi→हिन्दी, English→English (no transliteration).
+  - Tests: backend `test_stt.py` (English never forced to Hindi, full language-code mapping table incl. empty/unknown, native-script preservation) and frontend `StudentExperience.test.tsx` (selector default = `indic-auto`, choice persisted).
+* **Decision — "auto" default**: Because Gnani documents an auto-detect value (`indic-auto`), `auto` uses it rather than falling back to `en-IN`.
+
 
 ### Bug 1: RAG Grounding False Negatives (Question Not Found)
 * **Issue**: Tutor says "not covered" for questions that are clearly in the notes.

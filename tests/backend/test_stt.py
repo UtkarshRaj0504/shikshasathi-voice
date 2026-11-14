@@ -39,7 +39,83 @@ def test_stt_transcribe_student_success(client):
     data = response.json()
     assert "transcript" in data
     assert "language" in data
-    assert data["language"] == "en"
+    # The response reports the normalized (BCP-47) / detected language, not the raw input.
+    assert data["language"] == "en-IN"
+
+
+def test_stt_transcribe_english_is_never_forced_to_hindi(client):
+    """BUG 2 regression: asking in English must not come back as a Hindi transcript."""
+    student_token = register_and_login(client, "student_en@example.com", "Student EN", "student")
+
+    response = client.post(
+        "/stt/transcribe",
+        files={"audio": ("audio.webm", io.BytesIO(b"english speech"), "audio/webm")},
+        data={"language_code": "en"},
+        headers={"Authorization": f"Bearer {student_token}"}
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["language"] == "en-IN"
+    # English speech returns an English (Latin-script) transcript, not Devanagari.
+    assert "photosynthesis" in data["transcript"].lower()
+    assert not any("\u0900" <= ch <= "\u097f" for ch in data["transcript"])
+
+
+@pytest.mark.parametrize(
+    "sent,expected",
+    [
+        ("en", "en-IN"),
+        ("en-IN", "en-IN"),
+        ("en-US", "en-IN"),
+        ("hi", "hi-IN"),
+        ("kn", "kn-IN"),
+        ("ta", "ta-IN"),
+        # "auto"/unknown must use the documented auto-detect value, never Hindi.
+        ("auto", "indic-auto"),
+        ("indic-auto", "indic-auto"),
+        ("unknown_xyz", "indic-auto"),
+        ("", "indic-auto"),
+        # as-IN is unsupported by prisma-v3.0, so it is routed through auto-detect.
+        ("as", "indic-auto"),
+        ("as-IN", "indic-auto"),
+    ],
+)
+def test_stt_language_code_mapping(client, sent, expected):
+    student_token = register_and_login(
+        client, f"student_map_{sent or 'empty'}@example.com".replace("+", ""), "Student Map", "student"
+    )
+
+    response = client.post(
+        "/stt/transcribe",
+        files={"audio": ("audio.webm", io.BytesIO(b"speech"), "audio/webm")},
+        data={"language_code": sent},
+        headers={"Authorization": f"Bearer {student_token}"}
+    )
+    assert response.status_code == 200
+    assert response.json()["language"] == expected
+
+
+def test_stt_transcript_preserves_native_script(client):
+    """Kannada and Hindi stay in native script; no transliteration."""
+    student_token = register_and_login(client, "student_native@example.com", "Student Native", "student")
+
+    resp_kn = client.post(
+        "/stt/transcribe",
+        files={"audio": ("audio.webm", io.BytesIO(b"kannada"), "audio/webm")},
+        data={"language_code": "kn"},
+        headers={"Authorization": f"Bearer {student_token}"}
+    )
+    assert resp_kn.status_code == 200
+    assert any("\u0c80" <= ch <= "\u0cff" for ch in resp_kn.json()["transcript"])
+
+    resp_hi = client.post(
+        "/stt/transcribe",
+        files={"audio": ("audio.webm", io.BytesIO(b"hindi"), "audio/webm")},
+        data={"language_code": "hi"},
+        headers={"Authorization": f"Bearer {student_token}"}
+    )
+    assert resp_hi.status_code == 200
+    assert any("\u0900" <= ch <= "\u097f" for ch in resp_hi.json()["transcript"])
 
 
 def test_stt_transcribe_bad_file_type(client):

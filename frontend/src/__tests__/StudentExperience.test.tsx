@@ -51,6 +51,12 @@ describe("AudioPlayer Component", () => {
       screen.getByText(/Teacher voice unavailable; used default voice./i)
     ).toBeInTheDocument();
   });
+
+  it("labels mock audio when the mock TTS provider is active", () => {
+    const sampleB64 = "UklGRgAAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=";
+    render(<AudioPlayer audioBase64={sampleB64} isMock={true} />);
+    expect(screen.getByTestId("mock-audio-badge")).toHaveTextContent(/mock audio/i);
+  });
 });
 
 describe("StudentDashboard Flow", () => {
@@ -122,6 +128,43 @@ describe("StudentDashboard Flow", () => {
       expect(screen.getByText(/Default AI Voice \(Standard\)/i)).toBeInTheDocument();
       expect(screen.getAllByText(/Dr. Sharma's Voice/i).length).toBeGreaterThan(0);
       expect(screen.getAllByText(/Authorized Cloned Voice/i).length).toBeGreaterThan(0);
+    });
+  });
+
+  it("defaults the question language to auto-detect and persists the student's choice", async () => {
+    vi.spyOn(api, "getDocuments").mockResolvedValue([
+      { id: 301, chapter_id: 101, filename: "notes.txt", status: "ready" },
+    ]);
+    vi.spyOn(api, "fetchDocumentFile").mockResolvedValue(
+      new TextEncoder().encode("Photosynthesis is how plants make food.").buffer
+    );
+    const updatePrefs = vi.spyOn(api, "updatePreferences").mockResolvedValue({
+      voice_profile_id: null,
+      question_language: "indic-auto",
+      answer_language: "en",
+    });
+
+    render(<StudentDashboard onLogout={vi.fn()} />);
+
+    // Navigate to the study reader
+    await waitFor(() => expect(screen.getByText(/Science/i)).toBeInTheDocument());
+    fireEvent.change(screen.getByRole("combobox"), { target: { value: "10" } });
+    await waitFor(() => expect(screen.getByText(/Light - Reflection & Refraction/i)).toBeInTheDocument());
+    fireEvent.click(screen.getByText(/Light - Reflection & Refraction/i));
+    fireEvent.click(screen.getByRole("button", { name: /Continue to Choose Teacher Voice/i }));
+    await waitFor(() => expect(screen.getByText(/Choose How Your AI Tutor Speaks/i)).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: /Save Preference & Open Study Reader/i }));
+
+    // The question-language selector defaults to the documented auto-detect value.
+    const questionLangSelect = await screen.findByTestId("question-language-select");
+    expect((questionLangSelect as HTMLSelectElement).value).toBe("indic-auto");
+
+    // Choosing English persists question_language (not answer_language).
+    fireEvent.change(questionLangSelect, { target: { value: "en" } });
+    await waitFor(() => {
+      expect(updatePrefs).toHaveBeenCalledWith(
+        expect.objectContaining({ question_language: "en" })
+      );
     });
   });
 });

@@ -25,12 +25,14 @@ ALLOWED_CONTENT_TYPES = [
 @router.post("/transcribe")
 async def transcribe_audio(
     audio: UploadFile = File(...),
-    language_code: str = Form("auto"),
+    language_code: str = Form("indic-auto"),
     user: User = Depends(require_student),
 ):
     """
     Transcribe student voice audio upload (webm, wav, mp3).
     Student role required. Max size 10MB.
+    language_code defaults to "indic-auto" for auto-detection across Indian languages,
+    or can be explicitly set to en, hi, kn, etc.
     """
     contents = await audio.read()
 
