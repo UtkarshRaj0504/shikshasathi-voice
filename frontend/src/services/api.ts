@@ -175,8 +175,7 @@ export const api = {
     chapterId?: number,
     answerLanguage: string = "en",
     level: string = "intermediate",
-    currentPage?: number,
-    history?: any[]
+    currentPage?: number
   ) =>
     request("/ask", {
       method: "POST",
@@ -186,7 +185,6 @@ export const api = {
         answer_language: answerLanguage,
         level,
         current_page: currentPage,
-        history,
       }),
     }),
 };

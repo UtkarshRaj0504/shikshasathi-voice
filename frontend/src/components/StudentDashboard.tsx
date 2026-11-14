@@ -122,7 +122,7 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ onLogout }) 
   const [ttsLoading, setTtsLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Conversation history (Phase 8)
+  // Latest question & answer (only the most recent exchange is kept)
   const [conversation, setConversation] = useState<MessageTurn[]>([]);
   const [latestAudio, setLatestAudio] = useState<{
     base64: string | null;
@@ -399,12 +399,6 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ onLogout }) 
     setAsking(true);
     setError(null);
 
-    // Prepare prior conversation history for context (Phase 8 follow-ups)
-    const historyPayload = conversation.map((c) => ({
-      role: c.role,
-      content: c.role === "user" ? c.question : c.answer,
-    }));
-
     let askAnswer = "";
     let askSources: any[] = [];
     let isGrounded = false;
@@ -416,8 +410,7 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ onLogout }) 
         selectedChapter.id,
         answerLanguage,
         level,
-        readerCurrentPage,
-        historyPayload
+        readerCurrentPage
       );
 
       askAnswer = res.answer;
@@ -478,7 +471,7 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ onLogout }) 
       setTtsLoading(false);
     }
 
-    // Add turn to conversation history
+    // Only the latest question and answer are kept: a new answer replaces the previous one.
     const userTurn: MessageTurn = {
       id: "u_" + Date.now(),
       role: "user",
@@ -505,7 +498,7 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ onLogout }) 
       timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
     };
 
-    setConversation((prev) => [...prev, userTurn, assistantTurn]);
+    setConversation([userTurn, assistantTurn]);
   };
 
   const getVoiceName = (voiceId: number | null) => {
@@ -1155,10 +1148,10 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ onLogout }) 
             />
           )}
 
-          {/* Conversation Thread (Phase 8: Follow-ups) */}
+          {/* Latest question & answer (the newest answer replaces the previous one) */}
           <div style={{ flex: 1, marginTop: "1rem" }}>
             <h4 style={{ margin: "0 0 0.75rem", color: "#495057", fontSize: "0.95rem", borderBottom: "1px solid #dee2e6", paddingBottom: "0.5rem" }}>
-              💬 Study Conversation ({conversation.length / 2} {conversation.length / 2 === 1 ? "turn" : "turns"})
+              💬 Latest Answer
             </h4>
 
             {conversation.length === 0 ? (
