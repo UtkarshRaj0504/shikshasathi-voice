@@ -55,3 +55,6 @@ coverage/
 # ========================
 *.bak
 *.tmp
+
+# Base44 preview wrapper (mounted by the environment at runtime, never committed)
+frontend/vite.preview.config.mjs
