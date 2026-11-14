@@ -7,8 +7,7 @@ indexed chunks become retrievable again:
     python backend/scripts/reembed_chunks.py
 
 It reuses the same embedding service as the ingestion pipeline, so chunks are
-re-embedded with the exact model/dimension and e5 "passage: " prefix used at
-query time.
+re-embedded with the exact model/dimension used at query time.
 """
 
 import os

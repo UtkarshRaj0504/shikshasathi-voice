@@ -4,7 +4,7 @@ Tests for RAG question answering (/ask) endpoint and LLM service integration.
 
 import numpy as np
 import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 from app.core.config import settings
 from app.models.document import Document
 from app.models.document_chunk import DocumentChunk
@@ -327,28 +327,23 @@ def test_embedding_dimension_is_384():
     assert embedding_service.dimension == 384
 
 
-def test_embedding_service_applies_e5_prefixes():
-    """Both query and passage sides must apply the e5 'query: ' / 'passage: ' prefixes."""
+def test_embedding_service_uses_mock_vectors_in_tests():
+    """Tests never touch the network: the deterministic mock vectors are used.
+
+    The vector depends on the raw text only, so the old e5 "query: " / "passage: "
+    prefixes are provably gone (a prefix would produce a different vector).
+    """
     from app.services.embedding_service import SentenceTransformerEmbeddingService
 
-    svc = SentenceTransformerEmbeddingService()
+    svc = SentenceTransformerEmbeddingService(settings.EMBEDDING_MODEL)
 
-    class _Emb:
-        def tolist(self):
-            return [0.0] * EMBEDDING_DIMENSION
+    assert svc.active_model_name == "mock-384"
+    assert svc.is_real_model is False
 
-    fake_model = MagicMock()
-    fake_model.encode.return_value = [_Emb()]
-    svc._model = fake_model
-
-    svc.embed_query("hello")
-    assert fake_model.encode.call_args[0][0] == ["query: hello"]
-
-    svc.embed_passage("hello")
-    assert fake_model.encode.call_args[0][0] == ["passage: hello"]
-
-    svc.embed_texts(["a", "b"], is_query=True)
-    assert fake_model.encode.call_args[0][0] == ["query: a", "query: b"]
+    vector = svc.embed_query("hello")
+    assert len(vector) == EMBEDDING_DIMENSION
+    assert svc.embed_passage("hello") == vector
+    assert svc.embed_texts(["hello"], is_query=True) == [vector]
 
 
 def test_ask_answered_from_notes(client, db_session):

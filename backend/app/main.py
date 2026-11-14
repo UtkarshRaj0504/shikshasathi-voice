@@ -101,7 +101,7 @@ def on_startup():
         )
         print(
             f"  Embedding:  {embedding_service.active_model_name} "
-            f"(provider: {'sentence-transformers' if embedding_real else 'mock'}, "
+            f"(provider: {'gemini' if embedding_real else 'mock'}, "
             f"mode: {'real' if embedding_real else 'mock'}, dim: {embedding_service.dimension})"
         )
         print(

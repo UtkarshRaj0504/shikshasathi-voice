@@ -1,11 +1,8 @@
 FROM python:3.12-slim
 
-ARG EMBEDDING_MODEL=intfloat/multilingual-e5-small
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1 \
-    HF_HOME=/home/shiksha/.cache/huggingface \
-    EMBEDDING_MODEL=${EMBEDDING_MODEL}
+    PIP_NO_CACHE_DIR=1
 
 WORKDIR /app
 
@@ -24,7 +21,6 @@ COPY --chown=1000:1000 deploy/huggingface/start.sh /app/start.sh
 RUN chmod 755 /app/start.sh
 
 USER 1000:1000
-RUN python -c "import os; from sentence_transformers import SentenceTransformer; SentenceTransformer(os.environ['EMBEDDING_MODEL'])"
 
 EXPOSE 7860
 ENTRYPOINT ["/app/start.sh"]

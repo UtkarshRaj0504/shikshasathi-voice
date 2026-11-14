@@ -39,8 +39,13 @@ Set these in the Hugging Face Space settings:
 - `RAG_DEBUG`
 - `GNANI_EVON_ENDPOINT`
 
-`GNANI_API_KEY` is needed when real Gnani services are selected. Set the key for
-the selected LLM provider (`GEMINI_API_KEY` or `OPENAI_API_KEY`). `GNANI_TIMBRE_ENDPOINT`,
+`GNANI_API_KEY` is needed when real Gnani services are selected. `GEMINI_API_KEY` is
+required in production: it powers both the LLM provider and the embeddings. Embeddings
+come from the Gemini embeddings REST API (`gemini-embedding-001`, truncated to 384
+dimensions); no embedding model is downloaded into the Space, so without
+`GEMINI_API_KEY` the backend falls back to mock vectors (the startup log reports
+`mode: mock`) and retrieval no longer matches uploaded material. `OPENAI_API_KEY` is
+only needed when the OpenAI LLM provider is selected. `GNANI_TIMBRE_ENDPOINT`,
 `GNANI_VOICE_CLONE_ENDPOINT`, `GNANI_TTS_MODEL`, `GNANI_TTS_VOICE`,
 `EMBEDDING_MODEL`, `SIMILARITY_THRESHOLD`, and `RAG_DEBUG` have application defaults
 and only need to be set when overriding them.

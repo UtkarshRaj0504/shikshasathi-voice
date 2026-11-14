@@ -100,7 +100,9 @@ class Settings(BaseSettings):
     VOICE_CLONE_RATE_WINDOW_SECONDS: int = 600  # rate-limit window (seconds)
 
     # Embedding & RAG
-    EMBEDDING_MODEL: str = "intfloat/multilingual-e5-small"
+    # Gemini embeddings REST API, truncated to 384 dims (pgvector column size).
+    # No local model is loaded; vectors are requested with GEMINI_API_KEY.
+    EMBEDDING_MODEL: str = "gemini-embedding-001"
     LLM_PROVIDER: str = "mock"
     LLM_MODEL: str = "gemini-3.5-flash-lite"
     GEMINI_API_KEY: str = ""
