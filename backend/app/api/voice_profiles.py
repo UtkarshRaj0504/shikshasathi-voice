@@ -28,7 +28,11 @@ from app.core.security import get_current_user
 from app.models.user import User, UserRole
 from app.models.voice_consent import VoiceConsent
 from app.models.voice_profile import VoiceProfile
-from app.services.audio_utils import AudioValidationError, validate_reference_audio
+from app.services.audio_utils import (
+    AudioValidationError,
+    normalize_reference_audio,
+    validate_reference_audio,
+)
 from app.services.tts_service import detect_audio_content_type
 from app.services.voice_clone_service import VoiceCloneError, get_voice_clone_service
 
@@ -272,6 +276,10 @@ def create_voice_profile(
     audio_bytes = file.file.read()
     try:
         validate_reference_audio(audio_bytes, file.filename, file.content_type)
+        # Browsers record WebM/Opus, which the provider cannot decode (it answers with
+        # an opaque HTTP 500). Transcode to 16 kHz mono WAV and check the exact decoded
+        # length before it reaches the provider.
+        audio_bytes = normalize_reference_audio(audio_bytes)
     except AudioValidationError as e:
         logger.warning("Reference audio rejected for teacher %s: %s", teacher.id, e.message)
         raise HTTPException(
@@ -282,7 +290,7 @@ def create_voice_profile(
     # Reference audio lives only in memory and is discarded right after cloning.
     service = get_voice_clone_service()
     try:
-        embedding_ref = service.create_voice(audio_bytes, filename=file.filename or "sample.wav")
+        embedding_ref = service.create_voice(audio_bytes, filename="sample.wav")
     except VoiceCloneError as e:
         db.add(
             VoiceProfile(

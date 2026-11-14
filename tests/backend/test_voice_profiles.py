@@ -47,6 +47,44 @@ def make_wav(seconds: float, sample_rate: int = 16000) -> bytes:
 VALID_WAV = make_wav(10)  # 10 s -> inside the 5-30 s window
 
 
+def make_webm_opus(seconds: float = 6.0, rate: int = 48000) -> bytes | None:
+    """Encode a speech-like mono signal as WebM/Opus — what a browser records.
+
+    Returns None when PyAV / libopus is unavailable so the WebM tests can skip
+    instead of failing on a machine without the encoder.
+    """
+    try:
+        import io
+
+        import av
+        import numpy as np
+    except Exception:  # pragma: no cover - PyAV is a declared dependency
+        return None
+
+    n = int(seconds * rate)
+    t = np.arange(n) / rate
+    pcm = (0.3 * 32767 * np.sin(2 * np.pi * 220.0 * t)).astype("<i2")
+
+    buf = io.BytesIO()
+    try:
+        with av.open(buf, mode="w", format="webm") as out:
+            stream = out.add_stream("libopus", rate=rate)
+            stream.layout = "mono"
+            frame = av.AudioFrame.from_ndarray(pcm.reshape(1, -1), format="s16", layout="mono")
+            frame.rate = rate
+            frame.pts = 0
+            for packet in stream.encode(frame):
+                out.mux(packet)
+            for packet in stream.encode(None):
+                out.mux(packet)
+    except Exception:  # pragma: no cover - encoder missing
+        return None
+    return buf.getvalue()
+
+
+WEBM_OPUS = make_webm_opus(6.0)
+
+
 def register_and_login(client, email, role, name="User"):
     client.post(
         "/auth/register",
@@ -183,6 +221,41 @@ def test_too_long_duration_rejected(client):
     res = _create_profile(client, token, wav=make_wav(40))
     assert res.status_code == 400
     assert "30 seconds" in res.json()["detail"]["message"]
+
+
+def test_normalize_reference_audio_outputs_16k_mono_wav():
+    """A WAV upload is normalized to the 16 kHz mono shape the provider expects."""
+    from app.services.audio_utils import _wav_duration_seconds, normalize_reference_audio
+
+    wav = normalize_reference_audio(VALID_WAV)
+    assert wav[:4] == b"RIFF" and wav[8:12] == b"WAVE"
+    assert struct.unpack("<H", wav[22:24])[0] == 1  # mono
+    assert struct.unpack("<I", wav[24:28])[0] == 16000  # sample rate
+    duration = _wav_duration_seconds(wav)
+    assert duration is not None and 9.0 < duration < 11.0
+
+
+def test_normalize_reference_audio_rejects_undecodable():
+    """Undecodable bytes must raise a clear error — never reach the provider as a 500."""
+    from app.services.audio_utils import AudioValidationError, normalize_reference_audio
+
+    with pytest.raises(AudioValidationError):
+        normalize_reference_audio(b"RIFF\x00\x00\x00\x00WAVE" + b"\x00" * 5000)
+
+
+@pytest.mark.skipif(WEBM_OPUS is None, reason="PyAV WebM/Opus encoder unavailable")
+def test_webm_recording_is_transcoded_and_accepted(client, db_session):
+    """A browser WebM/Opus recording must be transcoded, not sent raw (provider 500s)."""
+    token = register_and_login(client, "t_webm@example.com", "teacher")
+    res = client.post(
+        "/voice-profiles",
+        headers=_auth(token),
+        data={"voice_name": "WebM Voice", "consent_confirmed": "true", "languages": "en"},
+        files={"file": ("sample.webm", WEBM_OPUS, "audio/webm")},
+    )
+    assert res.status_code == 200, res.text
+    assert res.json()["status"] == "active"
+    assert db_session.get(VoiceProfile, res.json()["id"]).gnani_voice_id
 
 
 def test_empty_voice_name_rejected(client):

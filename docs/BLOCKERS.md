@@ -52,6 +52,15 @@ it can also mean the reference clip was rejected — try a clean 5-25 s WAV reco
 (our recorder and the server validate that range). If clean audio still 500s every time, escalate
 to Gnani support with the request timestamp and the message text.
 
+**Note (Bug 10)**: the persistent 500 was traced to the **audio format**, not the account. The
+browser records **WebM/Opus** and Gnani cannot decode WebM, so it returned the generic
+`HTTP 500 "We are facing technical difficulties."` on every attempt (a live probe: raw WebM → 500,
+the same audio as WAV → 200). The server now **transcodes every sample to 16 kHz mono WAV** with
+PyAV before sending it, and a truly unreadable file returns `INVALID_AUDIO` (HTTP 400) with a clear
+message. So a *200/active* result no longer depends on the browser producing WAV; a 500 that still
+survives retries is now genuinely provider-side (**escalate with the timestamp and body text**),
+while an `INVALID_AUDIO` 400 means the recording could not be read and should be re-recorded.
+
 ### Previously Resolved
 - ✅ TTS mock vs real provider selection (fixed in DECISIONS.md decision 4a)
 - ✅ Voice model/voice pairing (timbre-v3.0 + Lakshmi documented)

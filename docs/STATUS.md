@@ -13,12 +13,13 @@ network calls) and committed.
 | Bug 6 — Latest-answer-only study UI (no conversation log) | Done | `e1bbe3d` |
 | Bug 7 — Voice-clone preview played a beep (mock used by default) | Done | `ed05314` |
 | Bug 8 — `POST /voice-profiles` failed with an opaque HTTP 400 ("not cloning") | Done | `f3e7c3f` |
-| Bug 9 — `VOICE_CLONE_PROVIDER_ERROR` (Gnani embeddings HTTP 500 not retried) | Done | (this commit) |
+| Bug 9 — `VOICE_CLONE_PROVIDER_ERROR` (Gnani embeddings HTTP 500 not retried) | Done | `c544f81` |
+| Bug 10 — same HTTP 500 persisted: browser WebM/Opus audio sent to the provider | Done | (this commit) |
 | Feature — Teacher voice cloning (Gnani Vachana) | Done | `e43f81c` |
 
 ## Test results (last run)
 
-- Backend: `python -m pytest tests/backend -q` → **128 passed**.
+- Backend: `python -m pytest tests/backend -q` → **131 passed**.
 - Frontend: `npm run build` → exit 0 (only the pre-existing pdfjs `eval` and chunk-size warnings).
 - Frontend unit tests: `npx vitest run` → **13 passed** (2 files).
 
@@ -62,8 +63,30 @@ provider's message from the flat body (and the gateway `detail` / `422 detail[]`
 real reason reaches the UI on the final failure. The Step-2 cloned-synthesis path already sends
 the REQUIRED `audio_config` and surfaces the provider body, so no change was needed there. See
 `docs/DECISIONS.md` §7k. Two tests were added (500-then-200 retries to success; a persistent 500
-surfaces the provider message). If the 500 persists after retries it likely means the reference
-audio (or the account's cloning scope) is the problem — see `docs/BLOCKERS.md`.
+surfaces the provider message). Retrying and reporting the message made the error clearer, but the
+500 **still happened on every attempt** — the real cause was the uploaded bytes (Bug 10).
+
+## BUG 10 — the same HTTP 500 persisted: browser WebM/Opus was sent to the provider
+
+**Symptom**: after Bug 9, creating a voice profile still failed every time with
+`VOICE_CLONE_PROVIDER_ERROR: Voice cloning failed (HTTP 500). We are facing technical difficulties.
+Please try again later.` (the message now came from Gnani's own body, but the 500 never went away).
+
+**Root cause** (confirmed by a live probe against the real endpoint): the browser's `MediaRecorder`
+records **WebM/Opus**, and the client-side `blobToWav` helper silently returned the *original* blob
+whenever `AudioContext.decodeAudioData` failed. Gnani **cannot decode WebM** and answers with the
+generic HTTP 500 above; the exact same audio transcoded to WAV returned HTTP 200 with an embedding.
+Probe evidence: raw WebM → `500 {"message":"We are facing technical difficulties."}`, decoded WAV →
+`200 {"success":true,...}`.
+
+**Fix**: `app/services/audio_utils.py` now has `normalize_reference_audio()`, which decodes whatever
+the browser produced with **PyAV** (bundled FFmpeg — already a declared dependency) and re-encodes it
+as **16 kHz mono 16-bit WAV** before the provider call; undecodable bytes raise a clear
+`INVALID_AUDIO` (HTTP 400) instead of reaching the provider as an opaque 500. Duration is now checked
+on the **decoded** audio (the old byte-size estimate wrongly rejected short-but-valid WebM/Opus
+clips). `POST /voice-profiles` calls this right after `validate_reference_audio()` and always sends
+the provider a `sample.wav`. See `docs/DECISIONS.md` §7l. Three tests were added (normalized output is
+16 kHz mono WAV; undecodable bytes raise; a real WebM/Opus upload creates an active profile).
 
 ## BUG 1 — RAG grounding false negatives
 
