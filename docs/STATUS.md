@@ -104,7 +104,8 @@ that teacher's cloned voice in the study page.
 
 - `VoiceCloneService` interface (`create_voice`, `synthesize_with_cloned_voice`, `delete_voice`,
   `is_mock`) with `MockVoiceCloneService` and `GnaniVoiceCloneService`, selected by
-  `VOICE_CLONE_PROVIDER` (default `mock`; tests always get the mock).
+  `VOICE_CLONE_PROVIDER` (default `auto`: real when `GNANI_API_KEY` is set, else mock; tests
+  always get the mock).
 - `VoiceConsent` table (Alembic `004_voice_clone`): teacher_id, consent_text_version, full
   consent text, confirmed, IP, user agent, revoked_at/revoke_reason, timestamps.
 - `VoiceProfile`: teacher_id, voice_name, `gnani_voice_id` (embedding JSON), languages, status
@@ -145,7 +146,7 @@ that teacher's cloned voice in the study page.
 | Cloned-voice playback wiring, disclosure label, fallback-with-notice | **Real** |
 | Gnani embeddings + cloned-TTS HTTP contract (URLs, headers, model, payload) | **Real (documented contract)** |
 | Network calls to Gnani during tests | **Mocked** (tests never hit the network) |
-| Voice provider when `VOICE_CLONE_PROVIDER=mock` (default) | **Mock** (synthesises a tone; labelled in the UI) |
+| Voice provider when `VOICE_CLONE_PROVIDER=mock`, or `auto` with no `GNANI_API_KEY` | **Mock** (synthesises a 320 Hz tone labelled "🧪 mock audio"; delete + re-create after switching to the real provider) |
 | Provider voice deletion | **Not available** — best-effort no-op (no documented endpoint) |
 
 ## Manual verification

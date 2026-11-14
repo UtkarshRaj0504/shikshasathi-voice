@@ -92,9 +92,12 @@ cd frontend ; npx vitest run           # expect: 13 passed
 
 ## FEATURE — Teacher voice cloning (Gnani Vachana)
 
-With no `GNANI_API_KEY` (or `VOICE_CLONE_PROVIDER=mock`, the default) cloning runs against the
-**mock** provider: everything works end to end and the audio is a synthetic tone labelled in the
-UI. Set `VOICE_CLONE_PROVIDER=gnani` and a real `GNANI_API_KEY` to exercise the real API.
+With no `GNANI_API_KEY` (or if you force `VOICE_CLONE_PROVIDER=mock`) cloning runs against the
+**mock** provider: everything works end to end and the preview is a synthetic tone labelled
+"🧪 mock audio (synthetic development tone)". With `VOICE_CLONE_PROVIDER=auto` (the default) and a
+real `GNANI_API_KEY`, the real API is used. **If you created a voice while the mock was active,
+delete it and create it again** — its stored embedding is a mock one and cannot be synthesized by
+the real provider.
 
 ### Teacher — create a cloned voice
 1. Log in as a **teacher**, open the dashboard and switch to the **🎙️ My Voice** tab.

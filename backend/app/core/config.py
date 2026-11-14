@@ -49,7 +49,7 @@ class Settings(BaseSettings):
     # Gnani API keys & AI providers
     STT_PROVIDER: str = "auto"
     TTS_PROVIDER: str = "auto"
-    VOICE_CLONE_PROVIDER: str = "mock"  # mock (default) | gnani | auto (gnani when GNANI_API_KEY is set)
+    VOICE_CLONE_PROVIDER: str = "auto"  # auto (default) | mock | gnani — auto = real when GNANI_API_KEY is set
     GNANI_API_KEY: str = ""
     GNANI_PRISMA_ENDPOINT: str = "https://api.vachana.ai/stt/v3"
     GNANI_EVON_ENDPOINT: str = ""

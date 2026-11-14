@@ -258,14 +258,14 @@ def get_voice_clone_service() -> VoiceCloneService:
     Select a voice clone implementation.
 
     - Tests (pytest / APP_ENV=test) always use Mock; no network calls.
-    - VOICE_CLONE_PROVIDER=mock (default) -> Mock.
+    - VOICE_CLONE_PROVIDER=mock -> Mock (offline tone; labelled in the UI).
     - VOICE_CLONE_PROVIDER=gnani -> Gnani (errors clearly when the key is missing).
-    - VOICE_CLONE_PROVIDER=auto -> Gnani when a key is present, otherwise Mock.
+    - VOICE_CLONE_PROVIDER=auto (default) -> Gnani when a key is present, otherwise Mock.
     """
     if "pytest" in sys.modules or os.getenv("APP_ENV") == "test" or settings.APP_ENV == "test":
         return MockVoiceCloneService()
 
-    provider = (getattr(settings, "VOICE_CLONE_PROVIDER", "mock") or "mock").strip().lower()
+    provider = (getattr(settings, "VOICE_CLONE_PROVIDER", "auto") or "auto").strip().lower()
     has_key = bool((getattr(settings, "GNANI_API_KEY", "") or "").strip())
 
     if provider == "mock":
