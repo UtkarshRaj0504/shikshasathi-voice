@@ -160,6 +160,13 @@ export const api = {
         "The backend is starting or temporarily unavailable. Please wait a moment and retry."
       );
     }
+    if (res.status === 404) {
+      // The document record exists but its file is gone from storage; the raw
+      // backend detail ("File not found on storage") means nothing to a student.
+      throw new Error(
+        "This material is no longer available. Please ask your teacher to upload it again."
+      );
+    }
     if (!res.ok) {
       const errData = await res.json().catch(() => ({}));
       throw new Error(errData.detail || `Failed to fetch file (${res.status})`);

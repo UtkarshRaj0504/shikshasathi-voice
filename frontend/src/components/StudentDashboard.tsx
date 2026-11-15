@@ -311,6 +311,23 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ onLogout }) 
     }
   };
 
+  // Returning to material selection from the reader keeps the subject so the chapter
+  // list is still there; changing the subject clears it and asks the student to pick again.
+  const handleChangeChapter = () => {
+    setShowVoiceModal(false);
+    setError(null);
+    setCurrentStep("SELECT_MATERIAL");
+  };
+
+  const handleChangeSubject = () => {
+    setShowVoiceModal(false);
+    setError(null);
+    setSelectedSubject(null);
+    setSelectedChapter(null);
+    setChapters([]);
+    setCurrentStep("SELECT_MATERIAL");
+  };
+
   const startRecording = async () => {
     setError(null);
     cancelPendingSpeech();
@@ -840,7 +857,13 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ onLogout }) 
           <span className="badge badge-muted">
             🎙️ Voice: <strong style={{ color: "var(--color-text)" }}>{getVoiceName(selectedVoiceId)}</strong>
           </span>
-          <button className="btn btn-ghost" onClick={() => setShowVoiceModal(true)}>Change</button>
+          <button className="btn btn-ghost" onClick={handleChangeChapter} data-testid="change-chapter">
+            ← Change Chapter
+          </button>
+          <button className="btn btn-ghost" onClick={handleChangeSubject} data-testid="change-subject">
+            Change Subject
+          </button>
+          <button className="btn btn-ghost" onClick={() => setShowVoiceModal(true)}>Change Voice</button>
           <UserMenu name={user?.name} role="Student" onLogout={handleLogout} />
         </div>
       </header>
